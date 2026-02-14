@@ -1,0 +1,9 @@
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+sqlmodel==0.0.22
+SQLAlchemy==2.0.38
+typer==0.15.1
+pydantic-settings==2.7.1
+python-dateutil==2.9.0.post0
+pytest==8.3.4
+httpx==0.27.2
