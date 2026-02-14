@@ -15,6 +15,7 @@ Admin-only intelligent trading advisor dashboard + subscriber notifications (Buy
 - Functional guide (what the UI means): `FUNCTIONAL.md`
 - Roadmap/progress: `ROADMAP.md`
 - Decisions log (pause/resume context): `DECISIONS.md`
+- Deployment guide (cloud-agnostic v0): `DEPLOYMENT.md`
 
 ## Quick demo (local)
 ```bash

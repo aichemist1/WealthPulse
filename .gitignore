@@ -19,3 +19,6 @@ build/
 .env
 .env.*
 scripts/pilot.env
+scripts/cloud_deploy.env
+scripts/aws_deploy_ssm.env
+prod.env
