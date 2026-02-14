@@ -1,5 +1,6 @@
 .DS_Store
 __pycache__/
+.pycacheprefix/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -8,9 +9,11 @@ venv/
 node_modules/
 dist/
 build/
+*.pyc
+*.pyo
+*.tsbuildinfo
 *.sqlite
 *.db
 *.db-journal
 *.log
 .env
-
