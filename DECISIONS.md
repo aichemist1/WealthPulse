@@ -99,3 +99,34 @@ Record decisions here so we can resume without re-deriving context.
 - Added an admin-only Alerts feed:
   - Fresh BUY/AVOID appeared (Fresh Whale Signals diff vs previous run)
   - Trend flips (bull/bear) for curated ETF/dividend watchlists
+
+## 2026-02-14 — Subscriber email (pilot)
+- Pilot-stage email delivery uses **SMTP** (Gmail + App Password recommended).
+- Subscription uses **double opt-in**: `/subscribe` sends a confirm link; `/confirm` activates.
+- Every daily send creates an auditable artifact:
+  - `alert_runs` (policy + source snapshot run ids)
+  - `alert_items` (BUY/SELL only)
+  - `alert_deliveries` (per-subscriber send status)
+
+## 2026-02-14 — Subscriber thresholds (v0)
+- Subscriber alert thresholds are configurable from the admin dashboard (Tools) and persisted in `admin_settings` under key `subscriber_alert_policy_v0`.
+- Pilot emails are **plain-text only** for deliverability and speed.
+
+## 2026-02-14 — Subscriber reliability (v0)
+- Emails are **diff-gated** (if alert items didn’t change vs the previous run, deliveries are recorded as `skipped`).
+- Admin dashboard includes a **deliveries history** view (last 5 days by default) to debug send outcomes without CLI.
+
+## 2026-02-14 — Manual-only subscriber sending (v0)
+- Alert **generation is automatic** (dashboard always has a “today” draft for admin review).
+- Email **sending is manual** from the dashboard:
+  - Per-item **Send** sends just that alert (creates a separate run for audit/history).
+  - **Send All** sends the full draft run.
+- Runs tab keeps the existing history UI; “Generate Draft Now” remains available for ad-hoc regeneration/testing.
+
+## 2026-02-14 — Fresh Whale Signals avoid gating tweak
+- `avoid` now requires **bearish trend**, or **net insider selling while trend is not bullish**.
+- Rationale: if trend is strongly bullish (close>SMA50 and 20D>0), insider selling is treated as **risk/watch**, not an automatic avoid.
+
+## 2026-02-14 — Admin authentication (pilot)
+- Add a simple admin login flow (password-only) and protect all `/admin/*` endpoints when `WEALTHPULSE_ADMIN_PASSWORD` is set.
+- Token transport: `Authorization: Bearer <token>` stored in browser local storage (pilot simplicity).

@@ -34,7 +34,7 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [ ] Basic backtest harness (5D/20D) + baseline comparison
 
 ## Phase 3 — Admin dashboard (Private)
-- [ ] Dashboard: segments row
+- [x] Dashboard: segments row (Themes)
 - [ ] Dashboard: top movers
 - [x] Dashboard: top picks + insider feed (+ drill-down drawer)
 - [x] Dashboard: ETF / Macro Plays card (seed: GLD, AIQ, QTUM, SKYY, MAGS, JTEK, ARKW, CHAT, HACK)
@@ -43,13 +43,22 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [x] Stock detail drawer: evidence timeline + score breakdown (v0 for Top Picks)
 - [ ] Admin tools: thresholds, allow/deny lists, segment priority config
 - [x] Admin QA view: snapshot health + run browser + coverage (moved to Runs tab)
-- [x] Admin-only Alerts card (Fresh BUY/AVOID + watchlist trend flips)
+- [x] Admin-only Alerts feed (backend implemented; UI currently focused on subscriber alert review)
+- [x] Subscriber Alerts (manual send) card on Latest (auto-drafted daily; per-item send + send-all)
+- [ ] Admin authentication (login) + basic access control (before cloud deploy)
 
 ## Phase 4 — Subscriber alerts (Subscription)
+- [x] Subscription schema + double opt-in (confirm + unsubscribe tokens)
+- [x] Deliver email alerts (pilot SMTP; Gmail app password recommended)
+- [x] Daily alert artifact (AlertRun + AlertItems + deliveries log)
+- [x] Admin thresholds for subscriber alerts (Tools panel + persisted settings)
+- [x] Diff-based sending (skip if no changes)
+- [x] Deliveries history (admin UI, last 5 days)
+- [x] Manual-only send (admin review; sending is explicit)
+- [x] Auto-generate daily draft for admin review (no auto-send)
 - [ ] Subscription tiers + limits (daily alerts, #stocks, segments)
-- [ ] Alert generation from daily snapshot + diffing
-- [ ] Deliver email alerts (MVP); add SMS/push later
-- [ ] Compliance copy/disclosures + audit trail per alert
+- [ ] Alert generation schedule control (time-of-day draft build; timezone config)
+- [ ] Compliance copy/disclosures + audit trail per alert (partial: basic disclaimer + run artifacts exist)
 
 ## Phase 5 — Reliability & scale
 - [ ] Observability dashboards + alerting on pipeline failures

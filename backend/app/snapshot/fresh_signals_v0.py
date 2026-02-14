@@ -9,6 +9,8 @@ from sqlmodel import Session, select
 from sqlmodel import col
 
 from app.models import InsiderTx, LargeOwnerFiling, PriceBar, Security, Snapshot13FWhale, SnapshotRun
+from app.snapshot.market_regime import compute_market_regime
+from app.snapshot.sector_regime import compute_sector_regimes
 from app.snapshot.trend import compute_trend_from_closes
 
 
@@ -74,6 +76,10 @@ class FreshSignalFeatures:
 
     context_13f: Optional[dict]
 
+    market: Optional[dict]
+
+    sector: Optional[dict]
+
 
 def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalParams) -> FreshSignalRow:
     # Score components (0..100), centered at 50 (neutral).
@@ -113,7 +119,26 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
         elif delta < 0:
             score -= 3.0
 
+    # Market regime (small additive): de-risk in bearish tape, slight boost in bullish tape.
+    market_score_adj = 0.0
+    if features.market is not None:
+        if features.market.get("bearish_recent"):
+            market_score_adj = -2.0
+        elif features.market.get("bullish_recent"):
+            market_score_adj = +1.0
+    score += market_score_adj
+
+    # Sector regime (optional): only applied when the ticker has a sector ETF mapping.
+    sector_score_adj = 0.0
+    if features.sector is not None:
+        if features.sector.get("bearish_recent"):
+            sector_score_adj = -1.0
+        elif features.sector.get("bullish_recent"):
+            sector_score_adj = +1.0
+    score += sector_score_adj
+
     score_i = int(round(_clamp(score, 0.0, 100.0)))
+    conviction_1_10 = int((score_i + 9) // 10)
 
     # Direction + action
     direction = "neutral"
@@ -130,7 +155,9 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
     action = "watch"
     if score_i >= params.buy_score_threshold and has_fresh_event and (features.trend_bullish_recent or net > 0):
         action = "buy"
-    elif score_i <= params.avoid_score_threshold and has_fresh_event and (features.trend_bearish_recent or net < 0):
+    elif score_i <= params.avoid_score_threshold and has_fresh_event and (
+        features.trend_bearish_recent or (net < 0 and not features.trend_bullish_recent)
+    ):
         action = "avoid"
 
     # Confidence (signal reliability, not profit probability)
@@ -147,6 +174,23 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
         conf += 0.05
     if features.context_13f is not None:
         conf += 0.05
+
+    # Market regime confidence adjustment (small): bearish tape reduces conviction.
+    market_conf_adj = 0.0
+    if features.market is not None:
+        if features.market.get("bearish_recent"):
+            market_conf_adj = -0.05
+        elif features.market.get("bullish_recent"):
+            market_conf_adj = +0.02
+    conf += market_conf_adj
+
+    sector_conf_adj = 0.0
+    if features.sector is not None:
+        if features.sector.get("bearish_recent"):
+            sector_conf_adj = -0.02
+        elif features.sector.get("bullish_recent"):
+            sector_conf_adj = +0.01
+    conf += sector_conf_adj
 
     # Penalize conflicting setup: strong fresh event but trend opposite.
     if features.sc13_count > 0 and features.trend_bearish_recent:
@@ -176,6 +220,11 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
         "trend_flags": {"bullish_recent": features.trend_bullish_recent, "bearish_recent": features.trend_bearish_recent},
         "volume": features.volume,
         "context_13f": features.context_13f,
+        "market": features.market,
+        "market_adjustment": {"score": market_score_adj, "confidence": market_conf_adj},
+        "sector": features.sector,
+        "sector_adjustment": {"score": sector_score_adj, "confidence": sector_conf_adj},
+        "conviction_1_10": conviction_1_10,
     }
 
     return FreshSignalRow(
@@ -293,6 +342,12 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
             }
 
     out: list[FreshSignalRow] = []
+    market = compute_market_regime(session=session, as_of=params.as_of, ticker="SPY")
+    sector_regimes = compute_sector_regimes(session=session, as_of=params.as_of)
+    # Optional per-ticker mapping (admin setting). Keep empty by default.
+    from app.admin_settings import get_setting
+
+    ticker_sector_map = get_setting(session, "ticker_sector_etf_map_v0") or {}
 
     for t in tickers:
         sc13 = sc13_by_ticker.get(t, {"count": 0, "latest_filed_at": None})
@@ -448,6 +503,12 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
                 volume=vol_obj,
                 volume_spike=vol_spike,
                 context_13f=whale,
+                market=market,
+                sector=(
+                    sector_regimes.get(ticker_sector_map.get(t))
+                    if isinstance(ticker_sector_map, dict) and isinstance(ticker_sector_map.get(t), str)
+                    else None
+                ),
             ),
             params=params,
         )

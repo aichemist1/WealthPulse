@@ -394,3 +394,124 @@ class AdminAlert(SQLModel, table=True):
         Index("ix_admin_alert_created_at", "created_at"),
         Index("ix_admin_alert_kind_created_at", "kind", "created_at"),
     )
+
+
+class Subscriber(SQLModel, table=True):
+    """
+    Subscriber account (alerts only, no dashboard access).
+    v0: email + status.
+    """
+
+    __tablename__ = "subscribers"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    email: str = Field(index=True)
+    status: str = Field(default="pending", index=True)  # pending|active|unsubscribed|bounced
+    tier: str = Field(default="pilot", index=True)  # pilot|pro|...
+
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    confirmed_at: Optional[datetime] = Field(default=None, index=True)
+    unsubscribed_at: Optional[datetime] = Field(default=None, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_subscriber_email"),
+        Index("ix_subscriber_status_created", "status", "created_at"),
+    )
+
+
+class SubscriberToken(SQLModel, table=True):
+    """
+    Token table for double opt-in and unsubscribe.
+    Store only a hash of the token (never plaintext).
+    """
+
+    __tablename__ = "subscriber_tokens"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    token_hash: str = Field(index=True)
+    purpose: str = Field(index=True)  # confirm|unsubscribe
+    subscriber_id: str = Field(foreign_key="subscribers.id", index=True)
+
+    expires_at: datetime = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    used_at: Optional[datetime] = Field(default=None, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_subscriber_token_hash"),
+        Index("ix_subscriber_token_purpose_expires", "purpose", "expires_at"),
+    )
+
+
+class AlertRun(SQLModel, table=True):
+    """
+    Auditable artifact: the set of alert items we intended to deliver for an as-of time.
+    """
+
+    __tablename__ = "alert_runs"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    as_of: datetime = Field(index=True)
+    status: str = Field(default="draft", index=True)  # draft|sent|skipped
+    policy: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    source_runs: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))  # run_id per snapshot kind
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    sent_at: Optional[datetime] = Field(default=None, index=True)
+
+    __table_args__ = (
+        Index("ix_alert_run_as_of_created", "as_of", "created_at"),
+        Index("ix_alert_run_status_created", "status", "created_at"),
+    )
+
+
+class AlertItem(SQLModel, table=True):
+    __tablename__ = "alert_items"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    run_id: str = Field(foreign_key="alert_runs.id", index=True)
+
+    ticker: str = Field(index=True)
+    action: str = Field(index=True)  # buy|sell
+    segment: str = Field(index=True)
+    score: int = Field(index=True)
+    confidence: float = Field(index=True)
+
+    why: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    evidence: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "ticker", name="uq_alert_item_run_ticker"),
+        Index("ix_alert_item_run_score", "run_id", "score"),
+    )
+
+
+class AlertDelivery(SQLModel, table=True):
+    __tablename__ = "alert_deliveries"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    run_id: str = Field(foreign_key="alert_runs.id", index=True)
+    subscriber_id: str = Field(foreign_key="subscribers.id", index=True)
+
+    status: str = Field(default="queued", index=True)  # queued|sent|failed|skipped
+    provider_message_id: Optional[str] = None
+    error: Optional[str] = None
+
+    queued_at: datetime = Field(default_factory=utcnow, index=True)
+    sent_at: Optional[datetime] = Field(default=None, index=True)
+
+    __table_args__ = (Index("ix_alert_delivery_run_status", "run_id", "status"),)
+
+
+class AdminSetting(SQLModel, table=True):
+    """
+    Simple admin-controlled settings store (v0).
+    Used for thresholds/toggles without redeploying.
+    """
+
+    __tablename__ = "admin_settings"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    key: str = Field(index=True)
+    value: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+    __table_args__ = (UniqueConstraint("key", name="uq_admin_settings_key"),)

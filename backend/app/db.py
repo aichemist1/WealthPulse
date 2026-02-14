@@ -68,6 +68,11 @@ def _sqlite_migrate() -> None:
         _sqlite_add_column_if_missing("large_owner_filings", "detected_at", "detected_at TIMESTAMP")
         _sqlite_add_column_if_missing("large_owner_filings", "raw_payload_id", "raw_payload_id TEXT")
 
+    # alert_runs: manual-only send requires status/sent_at columns
+    if "alert_runs" in _existing_tables():
+        _sqlite_add_column_if_missing("alert_runs", "status", "status TEXT")
+        _sqlite_add_column_if_missing("alert_runs", "sent_at", "sent_at TIMESTAMP")
+
 
 def _existing_tables() -> set[str]:
     with engine.connect() as conn:

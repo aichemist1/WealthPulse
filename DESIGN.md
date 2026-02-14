@@ -14,6 +14,40 @@ Generate explainable **Buy/Sell/Watch** recommendations by combining “big mone
 - `admin`: full dashboard + tools + config.
 - `subscriber`: alerts only.
 
+### Admin authentication (pilot)
+If `WEALTHPULSE_ADMIN_PASSWORD` is set, all `/admin/*` endpoints require an **Authorization Bearer token** obtained via the login page.
+
+## Subscriber alerts (v0 pilot)
+Subscribers do not access the dashboard. They receive a daily email (weekdays) containing up to 5 **BUY/SELL** signals.
+
+### Manual-only send (admin review)
+Alert **generation is automatic** (a daily draft is created for review), but **sending is manual**:
+- Admin reviews the generated alert items on the **Latest** dashboard.
+- Admin can **Send** individual alert items or **Send All**.
+- A manual “Generate Draft” option still exists in **Runs** for ad-hoc regeneration.
+
+### Email delivery (pilot)
+- Provider: **SMTP** (Gmail + App Password recommended for quick pilot testing).
+- Subscription flow: **double opt-in**
+  - `POST /subscribe { email }` → sends confirmation email
+  - `GET /confirm?token=...` → activates subscriber
+  - `GET /unsubscribe?token=...` → unsubscribes
+
+### Audit artifacts
+Every daily send produces an auditable, replayable artifact in SQLite:
+- `alert_runs` (as_of + policy + source snapshot run ids)
+- `alert_items` (selected tickers, BUY/SELL only, why + evidence)
+- `alert_deliveries` (per-subscriber delivery status)
+
+### Noise control (v0)
+Subscriber sends are **diff-gated**: if a draft run’s items are identical to the previous finalized run, the “Send All” operation marks the run as `skipped` and does not email.
+
+### Run lifecycle (v0)
+`alert_runs.status` is:
+- `draft`: generated for admin review (no email sent)
+- `sent`: email deliveries attempted
+- `skipped`: send was suppressed due to diff-gating (no deliveries created)
+
 
 ## v0 Technical Architecture (local-first, minimal)
 Goal: prove dashboard value with the fewest moving parts.
@@ -65,6 +99,11 @@ In addition to 13F-based Top Picks, we compute a separate **Fresh Whale Signals*
 - **Trend + volume** (timing/confirmation)
 
 This snapshot is designed for “what’s happening recently”, while 13F remains delayed context.
+
+### Avoid labeling in Fresh Whale Signals (v0)
+We keep AVOID conservative:
+- Insider selling can flag risk, but a **bullish trend** should generally prevent an automatic `avoid` label.
+- v0 rule: `avoid` requires **bearish trend**, or **net insider sell while trend is not bullish**.
 
 ### 13F “whale” score (context)
 Computed from the latest stored 13F delta snapshot (`snapshot_13f_whales`):

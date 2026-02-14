@@ -16,6 +16,45 @@ Admin-only intelligent trading advisor dashboard + subscriber notifications (Buy
 - Roadmap/progress: `ROADMAP.md`
 - Decisions log (pause/resume context): `DECISIONS.md`
 
+## Quick demo (local)
+```bash
+export WEALTHPULSE_SEC_USER_AGENT='WealthPulse (you@domain.com)'
+./run_demo_dashboard.sh
+```
+
+## Pilot subscriptions (email)
+We use SMTP for pilot stage (Gmail + App Password recommended).
+
+Quick pilot helper (avoids retyping env vars):
+```bash
+cp scripts/pilot.env.example scripts/pilot.env
+chmod 600 scripts/pilot.env
+bash scripts/pilot.sh dashboard
+```
+
+Required env (example for Gmail):
+```bash
+export WEALTHPULSE_SMTP_HOST='smtp.gmail.com'
+export WEALTHPULSE_SMTP_PORT='587'
+export WEALTHPULSE_SMTP_USE_STARTTLS='true'
+export WEALTHPULSE_SMTP_USER='your@gmail.com'
+export WEALTHPULSE_SMTP_PASSWORD='your_app_password'
+export WEALTHPULSE_SMTP_FROM_EMAIL='your@gmail.com'
+export WEALTHPULSE_PUBLIC_BASE_URL='http://localhost:8000'
+```
+
+Create a subscriber (sends confirm link):
+```bash
+cd backend
+python -m app.cli subscribe-email --email 'you@domain.com'
+```
+
+Send daily subscriber alerts (to all active subscribers):
+```bash
+cd backend
+python -m app.cli send-daily-subscriber-alerts-v0
+```
+
 ## Code (in progress)
 - Backend (FastAPI/SQLite): `backend/`
 - Frontend (admin UI): `frontend/`

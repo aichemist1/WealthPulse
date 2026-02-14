@@ -26,5 +26,20 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # Subscriber alerts (pilot): SMTP email
+    public_base_url: str = "http://localhost:8000"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_use_starttls: bool = True
+    smtp_from_email: str = ""
+    smtp_from_name: str = "WealthPulse"
+
+    # Admin auth (pilot): if admin_password is empty, auth is disabled (local dev convenience).
+    admin_password: str = ""
+    admin_token_secret: str = ""
+    admin_token_ttl_hours: int = 24
+
 
 settings = Settings()

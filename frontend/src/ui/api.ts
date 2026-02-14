@@ -3,14 +3,37 @@ export type ApiConfig = {
 };
 
 const defaultBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL || "";
+const tokenStorageKey = "wealthpulse_admin_token";
 
 export const apiConfig: ApiConfig = {
   baseUrl: defaultBaseUrl,
 };
 
+export function getAdminToken(): string {
+  try {
+    return String(localStorage.getItem(tokenStorageKey) || "");
+  } catch {
+    return "";
+  }
+}
+
+export function setAdminToken(token: string): void {
+  try {
+    if (!token) localStorage.removeItem(tokenStorageKey);
+    else localStorage.setItem(tokenStorageKey, token);
+  } catch {
+    // ignore
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const t = getAdminToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
 async function apiGet<T>(path: string): Promise<T> {
   const url = apiConfig.baseUrl ? `${apiConfig.baseUrl}${path}` : path;
-  const resp = await fetch(url, { headers: { Accept: "application/json" } });
+  const resp = await fetch(url, { headers: { Accept: "application/json", ...authHeaders() } });
   if (!resp.ok) {
     const txt = await resp.text();
     throw new Error(`${resp.status} ${resp.statusText}: ${txt}`);
@@ -22,7 +45,7 @@ async function apiPost<T>(path: string, body: unknown = null): Promise<T> {
   const url = apiConfig.baseUrl ? `${apiConfig.baseUrl}${path}` : path;
   const resp = await fetch(url, {
     method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...authHeaders() },
     body: body == null ? null : JSON.stringify(body),
   });
   if (!resp.ok) {
@@ -93,7 +116,41 @@ export type WatchlistRows = {
   }>;
 };
 
+export type LatestSegments = {
+  as_of: string;
+  segments: Array<{
+    key: string;
+    name: string;
+    as_of: string | null;
+    picks: Array<{
+      ticker: string;
+      score: number;
+      action: string;
+      confidence: number;
+      why: string;
+      source_kind: "recommendations_v0" | "fresh_signals_v0";
+    }>;
+  }>;
+};
+
+export type AdminSettingKV = {
+  key: string;
+  value: Record<string, unknown>;
+};
+
 export const api = {
+  authStatus: () => apiGet<{ enabled: boolean; ttl_hours: number }>("/admin/auth/status"),
+  adminLogin: (password: string) =>
+    apiPost<{ ok: boolean; token?: string; expires_at?: number; error?: string }>("/admin/auth/login", { password }),
+  listSubscribers: (status: string = "", limit: number = 200) =>
+    apiGet<{
+      counts: Record<string, number>;
+      rows: Array<{ email: string; status: string; created_at: string | null; confirmed_at: string | null; unsubscribed_at: string | null }>;
+    }>(`/admin/subscribers?status=${encodeURIComponent(status)}&limit=${encodeURIComponent(String(limit))}`),
+  manualAddSubscriber: (email: string, status: "pending" | "active" = "active") =>
+    apiPost<{ ok: boolean; email?: string; status?: string; error?: string }>("/admin/subscribers/manual-add", { email, status }),
+  inviteSubscriber: (email: string) =>
+    apiPost<{ ok: boolean; status?: string; error?: string }>("/subscribe", { email }),
   adminMetrics: () => apiGet<AdminMetrics>("/admin/metrics"),
   latest13FWhales: () => apiGet<Latest13FWhales>("/admin/snapshots/13f-whales/latest"),
   latestInsiderWhales: () => apiGet<LatestInsiderWhales>("/admin/snapshots/insider-whales/latest"),
@@ -140,4 +197,76 @@ export const api = {
       `/admin/alerts/latest?unread_only=${unreadOnly ? "true" : "false"}&limit=30`,
     ),
   ackAlert: (alertId: string) => apiPost<{ ok: boolean }>(`/admin/alerts/${encodeURIComponent(alertId)}/ack`),
+  latestSubscriberAlertDraft: () =>
+    apiGet<{
+      ok: boolean;
+      run: { id: string; as_of: string; created_at: string; status: string; sent_at: string | null; policy: Record<string, unknown> } | null;
+      items: Array<{ ticker: string; action: string; segment: string; score: number; confidence: number; why: Array<string>; evidence: Record<string, unknown> }>;
+    }>("/admin/subscriber-alerts/draft/latest"),
+  latestSegments: () => apiGet<LatestSegments>("/admin/segments/latest"),
+  getSubscriberAlertPolicyV0: () => apiGet<AdminSettingKV>("/admin/settings/subscriber-alert-policy-v0"),
+  setSubscriberAlertPolicyV0: (value: Record<string, unknown>) =>
+    apiPost<{ ok: boolean; value?: Record<string, unknown>; error?: string }>("/admin/settings/subscriber-alert-policy-v0", { value }),
+  createSubscriberAlertDraft: (asOf?: string) =>
+    apiPost<{
+      ok: boolean;
+      run?: {
+        id: string;
+        as_of: string;
+        created_at: string;
+        status: string;
+        sent_at: string | null;
+        items_count: number;
+        diff: any;
+      };
+      error?: string;
+    }>("/admin/subscriber-alerts/draft", asOf ? { as_of: asOf } : {}),
+  sendSubscriberAlertRun: (runId: string, limitSubscribers: number = 0) =>
+    apiPost<{
+      ok: boolean;
+      result?: { status: string; subscribers_seen: number; sent: number; failed: number; skipped: number; changed: boolean; run_id: string };
+      run?: { id: string; status: string; sent_at: string | null } | null;
+      error?: string;
+    }>(`/admin/subscriber-alerts/run/${encodeURIComponent(runId)}/send`, { limit_subscribers: limitSubscribers }),
+  sendSubscriberAlertItem: (sourceRunId: string, ticker: string, limitSubscribers: number = 0) =>
+    apiPost<{
+      ok: boolean;
+      source_run_id?: string;
+      new_run_id?: string;
+      result?: { status: string; subscribers_seen: number; sent: number; failed: number; skipped: number; changed: boolean; run_id: string };
+      run?: { id: string; status: string; sent_at: string | null } | null;
+      error?: string;
+    }>(`/admin/subscriber-alerts/run/${encodeURIComponent(sourceRunId)}/send-item`, { ticker, limit_subscribers: limitSubscribers }),
+  listSubscriberAlertRuns: (days: number = 5) =>
+    apiGet<{
+      days: number;
+      runs: Array<{
+        id: string;
+        as_of: string;
+        created_at: string;
+        status: string;
+        sent_at: string | null;
+        items_count: number;
+        deliveries: Record<string, number>;
+        diff: any;
+      }>;
+    }>(
+      `/admin/subscriber-alerts/runs?days=${encodeURIComponent(String(days))}&limit=50`,
+    ),
+  getSubscriberAlertRun: (runId: string) =>
+    apiGet<{
+      ok: boolean;
+      run?: {
+        id: string;
+        as_of: string;
+        created_at: string;
+        status: string;
+        sent_at: string | null;
+        policy: Record<string, unknown>;
+        source_runs: Record<string, unknown>;
+      };
+      items?: Array<{ ticker: string; action: string; segment: string; score: number; confidence: number; why: Array<string>; evidence: Record<string, unknown> }>;
+      deliveries?: Array<{ email: string; delivery: { status: string; queued_at: string; sent_at: string | null; error: string | null } }>;
+      error?: string;
+    }>(`/admin/subscriber-alerts/run/${encodeURIComponent(runId)}`),
 };

@@ -26,15 +26,26 @@ from app.models import Security
 from app.models import DividendMetrics
 from app.models import SnapshotInsiderWhale, SnapshotRun
 from app.models import SnapshotRecommendation
+from app.models import Subscriber
+from app.models import AlertDelivery, AlertRun
 from app.snapshot.insider_whales import compute_insider_whales, window_start
 from app.security_map import parse_security_map_csv
 from app.snapshot.thirteenf_whales import HoldingValueRow, compute_13f_whales, previous_quarter_end
 from app.snapshot.recommendations_v0 import WhaleDeltaRow, score_recommendations_from_13f
 from app.snapshot.fresh_signals_v0 import FreshSignalParams, compute_fresh_signals_v0
 from app.snapshot.trend import compute_trend_from_closes
+from app.snapshot.market_regime import compute_market_regime
 from app.snapshot.watchlists import parse_ticker_csv
 from app.connectors.yahoo_finance import YahooFinanceClient, YahooFinanceError
 from app.snapshot.alerts_v0 import generate_alerts_v0
+from app.subscriptions import issue_token, upsert_subscriber, confirm_subscription, unsubscribe
+from app.notifications.email_smtp import send_email_smtp, EmailSendError
+from app.alerts.send_subscriber_alerts_v0 import (
+    build_draft_subscriber_alert_run_v0,
+    send_subscriber_alert_run_v0,
+)
+from app.admin_settings import get_setting, set_setting
+from app.snapshot.sector_regime import compute_sector_regimes
 
 
 app = typer.Typer(add_completion=False)
@@ -780,6 +791,10 @@ def snapshot_recommendations_v0(
     fresh_start = as_of_dt - timedelta(days=fresh_days)
 
     with Session(engine) as session:
+        market = compute_market_regime(session=session, as_of=as_of_dt, ticker="SPY")
+        sector_regimes = compute_sector_regimes(session=session, as_of=as_of_dt)
+        ticker_sector_map = get_setting(session, "ticker_sector_etf_map_v0") or {}
+
         run = session.exec(
             select(SnapshotRun).where(col(SnapshotRun.kind) == "13f_whales").order_by(col(SnapshotRun.as_of).desc())
         ).first()
@@ -933,7 +948,43 @@ def snapshot_recommendations_v0(
 
             rec.reasons["whale_score"] = whale_score
             rec.reasons["trend_adjustment"] = trend_adj
-            rec.score = max(0, min(100, whale_score + trend_adj))
+
+            # Market regime (additive): small de-risking in bearish tape.
+            market_score_adj = 0
+            market_conf_adj = 0.0
+            if market is not None:
+                rec.reasons["market"] = market
+                if market.get("bearish_recent"):
+                    market_score_adj = -2
+                    market_conf_adj = -0.05
+                elif market.get("bullish_recent"):
+                    market_score_adj = +1
+                    market_conf_adj = +0.02
+
+            rec.reasons["market_adjustment"] = {"score": market_score_adj, "confidence": market_conf_adj}
+
+            # Sector regime (optional): requires a ticker->sector ETF mapping.
+            sector_score_adj = 0
+            sector_conf_adj = 0.0
+            sector_etf = None
+            if isinstance(ticker_sector_map, dict):
+                sector_etf = ticker_sector_map.get(rec.ticker)
+            if isinstance(sector_etf, str) and sector_etf in sector_regimes:
+                sr = sector_regimes[sector_etf]
+                rec.reasons["sector"] = {"etf": sector_etf, "regime": sr}
+                if sr.get("bearish_recent"):
+                    sector_score_adj = -1
+                    sector_conf_adj = -0.02
+                elif sr.get("bullish_recent"):
+                    sector_score_adj = +1
+                    sector_conf_adj = +0.01
+            rec.reasons["sector_adjustment"] = {"score": sector_score_adj, "confidence": sector_conf_adj}
+
+            rec.score = max(0, min(100, whale_score + trend_adj + market_score_adj + sector_score_adj))
+            rec.confidence = max(0.05, min(0.90, rec.confidence + market_conf_adj + sector_conf_adj))
+
+            # Derived display value: 1..10 conviction band (do not treat as guaranteed performance).
+            rec.reasons["conviction_1_10"] = int((rec.score + 9) // 10)
 
             if rec.score >= buy_score_threshold and (
                 rec.ticker in insider_buy_tickers or rec.ticker in sc13_tickers or rec.ticker in trend_bullish_tickers
@@ -1091,6 +1142,231 @@ def snapshot_fresh_signals_v0(
 
     for r in rows:
         typer.echo(f"{r.ticker} score={r.score} action={r.action} dir={r.direction} conf={r.confidence:.2f}")
+
+
+@app.command("subscribe-email")
+def subscribe_email(
+    email: str = typer.Option(..., help="Email address to subscribe (sends confirm email)"),
+) -> None:
+    from app.settings import settings
+
+    with Session(engine) as session:
+        sub = upsert_subscriber(session=session, email=email)
+        tok = issue_token(session=session, subscriber_id=sub.id, purpose="confirm", ttl_hours=48)
+        confirm_url = f"{settings.public_base_url.rstrip('/')}/confirm?token={tok.token}"
+        unsub_tok = issue_token(session=session, subscriber_id=sub.id, purpose="unsubscribe", ttl_hours=24 * 365 * 2)
+        unsub_url = f"{settings.public_base_url.rstrip('/')}/unsubscribe?token={unsub_tok.token}"
+
+        subject = "Confirm your WealthPulse subscription"
+        text = (
+            "Welcome to WealthPulse!\n\n"
+            "Please confirm your subscription:\n"
+            f"{confirm_url}\n\n"
+            f"Unsubscribe: {unsub_url}\n"
+        )
+        try:
+            send_email_smtp(to_email=sub.email, subject=subject, text_body=text)
+        except EmailSendError as e:
+            typer.echo(f"ERROR: failed to send confirmation email: {e}")
+            typer.echo("Manual confirm link (copy/paste in browser):")
+            typer.echo(confirm_url)
+            raise typer.Exit(code=2)
+        typer.echo(f"Sent confirmation email to {sub.email}.")
+        typer.echo(f"Confirm: {confirm_url}")
+
+
+@app.command("confirm-email-token")
+def confirm_email_token(
+    token: str = typer.Option(..., help="Confirmation token (from email link)"),
+) -> None:
+    with Session(engine) as session:
+        ok = confirm_subscription(session=session, token=token)
+    typer.echo("OK" if ok else "INVALID")
+
+
+@app.command("unsubscribe-token")
+def unsubscribe_token(
+    token: str = typer.Option(..., help="Unsubscribe token (from email link)"),
+) -> None:
+    with Session(engine) as session:
+        ok = unsubscribe(session=session, token=token)
+    typer.echo("OK" if ok else "INVALID")
+
+
+@app.command("send-daily-subscriber-alerts-v0")
+def send_daily_subscriber_alerts_cli(
+    as_of: str = typer.Option("", help="As-of datetime (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
+    limit_subscribers: int = typer.Option(0, help="Limit number of subscribers (0 = all)"),
+    send: bool = typer.Option(False, help="If set, also send emails (manual-only default is draft only)"),
+) -> None:
+    as_of_dt: Optional[datetime] = None
+    if as_of.strip():
+        try:
+            if "T" in as_of:
+                as_of_dt = datetime.fromisoformat(as_of)
+            else:
+                y, m, d = (int(x) for x in as_of.split("-"))
+                as_of_dt = datetime(y, m, d, 23, 59, 59)
+        except Exception:
+            raise typer.BadParameter("as_of must be YYYY-MM-DD or ISO datetime")
+
+    with Session(engine) as session:
+        run = build_draft_subscriber_alert_run_v0(session=session, as_of=as_of_dt)
+        typer.echo(f"Draft alert run created: run_id={run.id} status={run.status}")
+        if send:
+            res = send_subscriber_alert_run_v0(session=session, run_id=run.id, limit_subscribers=limit_subscribers)
+            typer.echo(
+                f"Send result: status={res.status} subs={res.subscribers_seen} sent={res.sent} failed={res.failed} skipped={res.skipped} changed={res.changed}"
+            )
+            return
+
+    typer.echo("Manual-only mode: review in dashboard and click Send when ready.")
+
+
+@app.command("list-subscribers")
+def list_subscribers(
+    status: str = typer.Option("", help="Optional status filter: pending|active|unsubscribed|bounced"),
+    limit: int = typer.Option(50, help="Max rows"),
+) -> None:
+    with Session(engine) as session:
+        stmt = select(Subscriber).order_by(col(Subscriber.created_at).desc()).limit(min(limit, 500))
+        if status.strip():
+            stmt = stmt.where(col(Subscriber.status) == status.strip())
+        rows = list(session.exec(stmt).all())
+
+    if not rows:
+        typer.echo("No subscribers.")
+        return
+
+    for s in rows:
+        typer.echo(
+            f"{s.email}\tstatus={s.status}\tcreated={s.created_at.isoformat()}"
+            + (f"\tconfirmed={s.confirmed_at.isoformat()}" if s.confirmed_at else "")
+            + (f"\tunsubscribed={s.unsubscribed_at.isoformat()}" if s.unsubscribed_at else "")
+        )
+
+
+@app.command("admin-activate-subscriber")
+def admin_activate_subscriber(
+    email: str = typer.Option(..., help="Email to activate (pilot/testing override; bypasses confirm token)"),
+) -> None:
+    email_n = (email or "").strip().lower()
+    with Session(engine) as session:
+        s = session.exec(select(Subscriber).where(col(Subscriber.email) == email_n)).first()
+        if s is None:
+            typer.echo("NOT FOUND")
+            raise typer.Exit(code=2)
+        s.status = "active"
+        s.confirmed_at = s.confirmed_at or datetime.utcnow()
+        session.add(s)
+        session.commit()
+    typer.echo("OK")
+
+
+@app.command("get-subscriber-alert-policy-v0")
+def get_subscriber_alert_policy_v0() -> None:
+    with Session(engine) as session:
+        v = get_setting(session, "subscriber_alert_policy_v0") or {}
+    if not v:
+        typer.echo("{}")
+    else:
+        typer.echo(v)
+
+
+@app.command("set-subscriber-alert-policy-v0")
+def set_subscriber_alert_policy_v0(
+    max_items: int = typer.Option(5, help="Max tickers per email"),
+    min_confidence: float = typer.Option(0.30, help="Min confidence to include"),
+    min_score_buy: int = typer.Option(75, help="Min score for BUY"),
+    min_score_sell: int = typer.Option(35, help="Max score for SELL"),
+    fresh_days: int = typer.Option(7, help="Freshness window (days)"),
+) -> None:
+    v = {
+        "max_items": int(max_items),
+        "min_confidence": float(min_confidence),
+        "min_score_buy": int(min_score_buy),
+        "min_score_sell": int(min_score_sell),
+        "fresh_days": int(fresh_days),
+    }
+    with Session(engine) as session:
+        row = set_setting(session, "subscriber_alert_policy_v0", v)
+    typer.echo(f"OK updated_at={row.updated_at.isoformat()} value={row.value}")
+
+
+@app.command("get-ticker-sector-etf-map-v0")
+def get_ticker_sector_etf_map_v0() -> None:
+    with Session(engine) as session:
+        v = get_setting(session, "ticker_sector_etf_map_v0") or {}
+    typer.echo(v)
+
+
+@app.command("set-ticker-sector-etf-map-v0")
+def set_ticker_sector_etf_map_v0(
+    mapping: str = typer.Option(
+        ...,
+        help="Comma-delimited pairs like AAPL=XLK,MSFT=XLK,XOM=XLE (sector ETFs: XLK,XLF,XLE,XLV,XLI,XLY,XLP,XLU,XLB,XLC,XLRE)",
+    ),
+) -> None:
+    m: dict[str, str] = {}
+    for part in (mapping or "").split(","):
+        p = part.strip()
+        if not p:
+            continue
+        if "=" not in p:
+            raise typer.BadParameter("mapping must use KEY=VALUE pairs")
+        k, v = p.split("=", 1)
+        k_u = k.strip().upper()
+        v_u = v.strip().upper()
+        if not k_u or not v_u:
+            continue
+        m[k_u] = v_u
+    with Session(engine) as session:
+        row = set_setting(session, "ticker_sector_etf_map_v0", m)
+    typer.echo(f"OK updated_at={row.updated_at.isoformat()} size={len(m)}")
+
+
+@app.command("list-alert-deliveries")
+def list_alert_deliveries(
+    run_id: str = typer.Option("", help="AlertRun id (default: latest)"),
+    limit: int = typer.Option(50, help="Max rows"),
+) -> None:
+    """
+    Inspect subscriber email send outcomes (queued/sent/failed) for debugging.
+    """
+
+    with Session(engine) as session:
+        run: AlertRun | None
+        if run_id.strip():
+            run = session.exec(select(AlertRun).where(col(AlertRun.id) == run_id.strip())).first()
+        else:
+            run = session.exec(select(AlertRun).order_by(col(AlertRun.created_at).desc())).first()
+
+        if run is None:
+            typer.echo("No alert runs.")
+            return
+
+        deliveries = list(
+            session.exec(
+                select(AlertDelivery, Subscriber.email)
+                .where(col(AlertDelivery.run_id) == run.id)
+                .join(Subscriber, col(Subscriber.id) == col(AlertDelivery.subscriber_id))
+                .order_by(col(AlertDelivery.queued_at).desc())
+                .limit(min(limit, 500))
+            ).all()
+        )
+
+    typer.echo(f"run_id={run.id} as_of={run.as_of.isoformat()} created_at={run.created_at.isoformat()}")
+    if not deliveries:
+        typer.echo("No deliveries.")
+        return
+
+    for d, email in deliveries:
+        msg = f"{email}\tstatus={d.status}\tqueued={d.queued_at.isoformat()}"
+        if d.sent_at:
+            msg += f"\tsent={d.sent_at.isoformat()}"
+        if d.error:
+            msg += f"\terror={d.error}"
+        typer.echo(msg)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@
   --muted: #9aa6c7;
   --border: rgba(255, 255, 255, 0.08);
   --error: #ff6b6b;
+  --accent: #8ab4ff;
 }
 
 html, body {
@@ -176,6 +177,190 @@ html, body {
   color: var(--text);
   border-color: rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.06);
+}
+
+.btnPrimary {
+  color: var(--text);
+  border-color: rgba(138, 180, 255, 0.35);
+  background: rgba(138, 180, 255, 0.14);
+}
+
+.btnPrimary:hover {
+  border-color: rgba(138, 180, 255, 0.55);
+  background: rgba(138, 180, 255, 0.22);
+}
+
+.loginShell {
+  min-height: calc(100vh - 48px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.loginCard {
+  width: min(520px, 92vw);
+  padding: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015));
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.loginTop {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.loginMark {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  background: rgba(138, 180, 255, 0.12);
+  border: 1px solid rgba(138, 180, 255, 0.25);
+}
+
+.loginTitle {
+  font-weight: 800;
+  font-size: 16px;
+}
+
+.loginSubtitle {
+  margin-top: 2px;
+}
+
+.loginRow {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  align-items: center;
+}
+
+.loginInput {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  outline: none;
+}
+
+.loginInput:focus {
+  border-color: rgba(138, 180, 255, 0.45);
+}
+
+.loginErrBox {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  background: rgba(255, 107, 107, 0.08);
+}
+
+.formGrid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 1100px) {
+  .formGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.formRow {
+  display: grid;
+  gap: 6px;
+}
+
+.formRow input {
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  outline: none;
+}
+
+.formRow input:focus {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.themesGrid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 1300px) {
+  .themesGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .themesGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.themeBucket {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  min-width: 0;
+}
+
+.themeTitle {
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.themePicks {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.themePick {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.themePick:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.themePickTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 4px;
 }
 
 .num { text-align: right !important; }

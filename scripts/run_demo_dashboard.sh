@@ -18,6 +18,7 @@ export PYTHONPATH="${BACKEND_DIR}"
 # Default to reusing the demo DB so you don't "lose" data between runs.
 # Set WEALTHPULSE_DEMO_RESET_DB=1 to recreate from scratch.
 RESET_DB="${WEALTHPULSE_DEMO_RESET_DB:-0}"
+REFRESH="${WEALTHPULSE_DEMO_REFRESH:-0}"
 
 BACKEND_PORT_DEFAULT="8000"
 FRONTEND_PORT_DEFAULT="5173"
@@ -34,10 +35,11 @@ DAY_CUR="${WEALTHPULSE_DEMO_DAY_CUR:-$DAY_CUR_DEFAULT}"
 REPORT_PERIOD="${WEALTHPULSE_DEMO_REPORT_PERIOD:-$REPORT_PERIOD_DEFAULT}"
 ASOF_DATE="${WEALTHPULSE_DEMO_ASOF_DATE:-$ASOF_DEFAULT}"
 
-INGEST_LIMIT_13F="${WEALTHPULSE_DEMO_INGEST_LIMIT_13F:-10}"
-INGEST_LIMIT_SC13="${WEALTHPULSE_DEMO_INGEST_LIMIT_SC13:-200}"
-INGEST_LIMIT_FORM4="${WEALTHPULSE_DEMO_INGEST_LIMIT_FORM4:-200}"
-EVENT_DAYS="${WEALTHPULSE_DEMO_EVENT_DAYS:-5}"
+INGEST_LIMIT_13F="${WEALTHPULSE_DEMO_INGEST_LIMIT_13F:-5}"
+INGEST_LIMIT_SC13="${WEALTHPULSE_DEMO_INGEST_LIMIT_SC13:-50}"
+INGEST_LIMIT_FORM4="${WEALTHPULSE_DEMO_INGEST_LIMIT_FORM4:-50}"
+# Multi-day SEC ingestion can be slow and rate-limit/403 prone. Default small; bump when needed.
+EVENT_DAYS="${WEALTHPULSE_DEMO_EVENT_DAYS:-2}"
 SNAPSHOT_LIMIT="${WEALTHPULSE_DEMO_SNAPSHOT_LIMIT:-50}"
 export WEALTHPULSE_SEC_RPS="${WEALTHPULSE_SEC_RPS:-2}"
 export WEALTHPULSE_SEC_TIMEOUT_S="${WEALTHPULSE_SEC_TIMEOUT_S:-60}"
@@ -54,6 +56,17 @@ fi
 echo "Using DB: ${DB_PATH}"
 echo "Ingest days: prev=${DAY_PREV} cur=${DAY_CUR}  |  report_period=${REPORT_PERIOD}"
 echo "Recommendations as_of: ${ASOF_DATE}"
+
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+out_contains() {
+  local needle="$1"
+  if has_cmd rg; then
+    echo "$2" | rg -q "$needle"
+  else
+    echo "$2" | grep -Eq "$needle"
+  fi
+}
 
 is_port_free() {
   local port="$1"
@@ -103,22 +116,61 @@ if [[ ! -x "${BACKEND_DIR}/.venv/bin/python" ]]; then
 fi
 
 echo "Installing/updating backend deps..."
-"${BACKEND_DIR}/.venv/bin/python" -m pip install -q -r "${BACKEND_DIR}/requirements.txt"
+REQ_STAMP="${BACKEND_DIR}/.venv/.requirements_stamp"
+if [[ ! -f "${REQ_STAMP}" ]] || [[ "${BACKEND_DIR}/requirements.txt" -nt "${REQ_STAMP}" ]]; then
+  "${BACKEND_DIR}/.venv/bin/python" -m pip install -q -r "${BACKEND_DIR}/requirements.txt"
+  date > "${REQ_STAMP}"
+else
+  echo "Backend deps already installed."
+fi
 
 echo "Installing frontend deps (if needed)..."
 pushd "${FRONTEND_DIR}" >/dev/null
-npm install >/dev/null
+if [[ ! -d node_modules ]]; then
+  npm install >/dev/null
+else
+  echo "Frontend deps already installed."
+fi
 popd >/dev/null
 
 echo "Initializing DB..."
 pushd "${BACKEND_DIR}" >/dev/null
 "${BACKEND_DIR}/.venv/bin/python" -m app.cli init-db
 
-echo "Ingesting 13F filings (small sample)..."
-"${BACKEND_DIR}/.venv/bin/python" -m app.cli ingest-13f-edgar --day "${DAY_PREV}" --limit "${INGEST_LIMIT_13F}"
-"${BACKEND_DIR}/.venv/bin/python" -m app.cli ingest-13f-edgar --day "${DAY_CUR}" --limit "${INGEST_LIMIT_13F}"
+HAS_EXISTING_DATA="$("${BACKEND_DIR}/.venv/bin/python" - <<'PY'
+from sqlmodel import Session, select
+from app.db import create_db_engine
+from app.models import SnapshotRun
 
-EVENT_DAYS_LIST="$(python3 - <<PY
+eng = create_db_engine()
+with Session(eng) as s:
+    any_run = s.exec(select(SnapshotRun.id)).first()
+print("1" if any_run else "0")
+PY
+)"
+
+if [[ "${RESET_DB}" != "1" && "${REFRESH}" != "1" && "${HAS_EXISTING_DATA}" == "1" ]]; then
+  echo "Existing demo data detected; skipping SEC ingestion."
+  echo "Set WEALTHPULSE_DEMO_REFRESH=1 to re-ingest SEC data."
+else
+	echo "Ingesting 13F filings (small sample)..."
+	for day in "${DAY_PREV}" "${DAY_CUR}"; do
+	  echo "  13F day: ${day}"
+	  out="$("${BACKEND_DIR}/.venv/bin/python" -m app.cli ingest-13f-edgar --day "${day}" --limit "${INGEST_LIMIT_13F}" 2>&1)" || true
+	  echo "${out}"
+	  if out_contains "403 Forbidden" "${out}"; then
+	    echo "  WARN: SEC 403 detected. Skipping remaining 13F ingestion to avoid wasting time."
+	    break
+	  fi
+	  if out_contains "filings_ingested=0" "${out}"; then
+	    echo "  NOTE: 13F ingested 0 rows for ${day}. Continuing."
+	  fi
+	  if out_contains "WARN:" "${out}"; then
+	    echo "  WARN: 13F ingestion failed for ${day} (SEC may be timing out)."
+	  fi
+	done
+
+	EVENT_DAYS_LIST="$(python3 - <<PY
 from datetime import date, timedelta
 y, m, d = (int(x) for x in "${DAY_CUR}".split("-"))
 start = date(y, m, d)
@@ -128,21 +180,40 @@ for i in range(max(1, days)):
 PY
 )"
 
-echo "Ingesting Schedule 13D/13G filings (corroborator; multi-day sample)..."
-for day in ${EVENT_DAYS_LIST}; do
-  echo "  SC13 day: ${day}"
-  if ! "${BACKEND_DIR}/.venv/bin/python" -m app.cli ingest-sc13-edgar --day "${day}" --limit "${INGEST_LIMIT_SC13}"; then
-    echo "  WARN: SC13 ingestion failed for ${day} (SEC may be timing out)."
-  fi
-done
+  echo "Ingesting Schedule 13D/13G filings (corroborator; multi-day sample)..."
+  for day in ${EVENT_DAYS_LIST}; do
+    echo "  SC13 day: ${day}"
+    out="$("${BACKEND_DIR}/.venv/bin/python" -m app.cli ingest-sc13-edgar --day "${day}" --limit "${INGEST_LIMIT_SC13}" 2>&1)" || true
+    echo "${out}"
+    if out_contains "403 Forbidden" "${out}"; then
+      echo "  WARN: SEC 403 detected. Stopping further SC13 ingestion to avoid wasting time."
+      break
+    fi
+    if out_contains "filings_ingested=0" "${out}"; then
+      echo "  NOTE: SC13 ingested 0 rows for ${day}. Continuing (could be mapping coverage)."
+    fi
+    if out_contains "WARN:" "${out}"; then
+      echo "  WARN: SC13 ingestion failed for ${day} (SEC may be timing out)."
+    fi
+  done
 
-echo "Ingesting Form 4 filings (insider corroborator; multi-day sample)..."
-for day in ${EVENT_DAYS_LIST}; do
-  echo "  Form4 day: ${day}"
-  if ! "${BACKEND_DIR}/.venv/bin/python" -m app.cli ingest-form4-edgar --day "${day}" --limit "${INGEST_LIMIT_FORM4}"; then
-    echo "  WARN: Form 4 ingestion failed for ${day} (SEC may be timing out)."
-  fi
-done
+  echo "Ingesting Form 4 filings (insider corroborator; multi-day sample)..."
+  for day in ${EVENT_DAYS_LIST}; do
+    echo "  Form4 day: ${day}"
+    out="$("${BACKEND_DIR}/.venv/bin/python" -m app.cli ingest-form4-edgar --day "${day}" --limit "${INGEST_LIMIT_FORM4}" 2>&1)" || true
+    echo "${out}"
+    if out_contains "403 Forbidden" "${out}"; then
+      echo "  WARN: SEC 403 detected. Stopping further Form 4 ingestion to avoid wasting time."
+      break
+    fi
+    if out_contains "filings_ingested=0" "${out}"; then
+      echo "  NOTE: Form 4 ingested 0 filings for ${day}. Continuing."
+    fi
+    if out_contains "WARN:" "${out}"; then
+      echo "  WARN: Form 4 ingestion failed for ${day} (SEC may be timing out)."
+    fi
+  done
+fi
 
 echo "Computing initial 13F whale snapshot..."
 "${BACKEND_DIR}/.venv/bin/python" -m app.cli snapshot-13f-whales --report-period "${REPORT_PERIOD}" --limit "${SNAPSHOT_LIMIT}" >/dev/null
@@ -271,8 +342,12 @@ for _ in $(seq 1 30); do
 done
 curl -sSf "${BACKEND_BASE_URL}/health" >/dev/null
 
-if ! curl -sSf "${BACKEND_BASE_URL}/admin/recommendations/latest" >/dev/null 2>&1; then
-  echo "Backend does not expose /admin/recommendations/latest yet."
+# Admin endpoints may be protected by pilot auth. Accept HTTP 401 as "endpoint exists".
+rec_code="$(curl -s -o /dev/null -w "%{http_code}" "${BACKEND_BASE_URL}/admin/recommendations/latest" || true)"
+if [[ "${rec_code}" == "401" ]]; then
+  echo "NOTE: Admin auth is enabled; the UI will prompt for the admin password."
+elif [[ "${rec_code}" != "200" ]]; then
+  echo "Backend does not expose /admin/recommendations/latest yet (HTTP ${rec_code})."
   echo "Stop any old backend processes and re-run this script."
   exit 2
 fi

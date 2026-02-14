@@ -12,6 +12,8 @@ The admin dashboard is designed to answer:
 2) *Why is this idea here?* (Evidence + score breakdown)
 3) *Is this “buy now” or just “watch”?* (Action gating + freshness)
 
+Separately, **subscribers** (no dashboard access) receive a daily email with up to **5 BUY/SELL** signals derived from the same snapshots.
+
 ## Core concepts
 
 ### 13F is context, not timing
@@ -60,6 +62,27 @@ The Alerts card surfaces:
 
 Alerts are meant to reduce “manual scanning” and help you focus on what changed since the prior run.
 
+## Subscriber alerts (pilot, v0)
+Subscribers receive a weekday email containing:
+- Up to **5** tickers
+- **BUY/SELL only** (no WATCH)
+- Minimal fields only: **Ticker, Action, Score, Confidence**
+
+Important: Confidence is **signal reliability**, not “probability of profit”. Filings can be delayed (especially 13F).
+
+### Manual review + manual send (current pilot flow)
+WealthPulse generates a daily **draft** of subscriber alerts for admin review, but **does not auto-send**.
+
+Admin flow:
+1) Open the **Latest** dashboard → review “Subscriber Alerts (manual send)”
+2) Click **Send** on a single ticker (sends only that alert), or **Send All** (sends the whole draft)
+3) Inspect outcomes in **Runs → Subscriber Email History**
+
+### Diff-based sending (noise control)
+Daily subscriber emails are **diff-gated**:
+- WealthPulse compares today’s alert items to the previous `alert_run`.
+- If there is **no change**, sends are marked as `skipped` in the DB to avoid spamming subscribers.
+
 ### Top Picks (v0)
 Each row is a ticker with:
 - **Score (0–100)**: combined whale + timing score
@@ -106,6 +129,20 @@ The final Score is:
 
 This is why two names with similar whale score can diverge if one has a better setup.
 
+### Market regime adjustment (timing context)
+We also compute a best-effort **market regime** using `SPY` (same trend rule as tickers).
+This is a **small additive adjustment**:
+- bearish market: slightly lower score/confidence
+- bullish market: slight boost
+
+This is meant to de-risk BUY calls during bearish tape; it is not a standalone signal.
+
+### Conviction (1–10)
+For readability in the UI/email, we derive a `conviction_1_10` band from the final score:
+- `conviction_1_10 = ceil(score / 10)`
+
+This is a presentation layer banding. It becomes a “predictive” performance label only after backtest calibration.
+
 ## What Confidence means (v0)
 Confidence is capped because 13F is delayed and our universe/coverage may be incomplete.
 It increases with:
@@ -142,7 +179,7 @@ It becomes `buy` only if:
 ### Fresh Whale Signals action rules (v0)
 Fresh Whale Signals uses `buy`, `watch`, and `avoid`:
 - **BUY**: score ≥ threshold **and** (fresh SC13 or insider net buy) **and** bullish trend or positive net insider flow
-- **AVOID**: score ≤ threshold **and** (fresh insider net sell) **and** bearish trend or negative net insider flow
+- **AVOID**: score ≤ threshold **and** (fresh insider net sell) **and** (bearish trend **or** negative net flow while trend is **not** bullish)
 - **WATCH**: everything else (keep it conservative; corroborate with your own research)
 
 Implementation note (v0):
