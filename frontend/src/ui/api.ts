@@ -2,7 +2,10 @@ export type ApiConfig = {
   baseUrl: string;
 };
 
-const defaultBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL || "";
+const envBaseUrl = String((import.meta as any).env?.VITE_API_BASE_URL || "").trim();
+// Production default: when the UI is served by our reverse proxy, the backend is reachable at /api.
+// Dev overrides should set VITE_API_BASE_URL explicitly (run_demo_dashboard.sh already does this).
+const defaultBaseUrl = envBaseUrl || "/api";
 const tokenStorageKey = "wealthpulse_admin_token";
 
 export const apiConfig: ApiConfig = {
