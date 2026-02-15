@@ -5,28 +5,32 @@
 :80 {
   encode gzip
 
-  # Backend (API)
-  handle_path /api/* {
-    reverse_proxy backend:8000
-  }
+  route {
+    # Backend (API)
+    handle /api/* {
+      uri strip_prefix /api
+      reverse_proxy backend:8000
+    }
 
-  # Backend (public pages used by email-only subscribers)
-  handle /health* {
-    reverse_proxy backend:8000
-  }
-  handle /subscribe* {
-    reverse_proxy backend:8000
-  }
-  handle /confirm* {
-    reverse_proxy backend:8000
-  }
-  handle /unsubscribe* {
-    reverse_proxy backend:8000
-  }
+    # Backend (public pages used by email-only subscribers)
+    handle /health* {
+      reverse_proxy backend:8000
+    }
+    handle /subscribe* {
+      reverse_proxy backend:8000
+    }
+    handle /confirm* {
+      reverse_proxy backend:8000
+    }
+    handle /unsubscribe* {
+      reverse_proxy backend:8000
+    }
 
-  # Frontend SPA
-  root * /srv
-  try_files {path} /index.html
-  file_server
+    # Frontend SPA (catch-all)
+    handle {
+      root * /srv
+      try_files {path} /index.html
+      file_server
+    }
+  }
 }
-
