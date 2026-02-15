@@ -388,5 +388,65 @@ At the end of each refresh cycle, your agent's dashboard should look like this (
 > **Risk Alert:** 10b5-1 Plan detected for CEO in 30 days; monitor for "Exit Decay."
 
 
+### Structure of the Dashboard requirements - prioritize clarity over complexity
+
+To finalize your intelligent stock advisor, you need a **Strategic Dashboard** that prevents "analysis paralysis." Since you are dealing with conflicting signals (Whale Buying vs. Reddit Panicking), your dashboard must prioritize **Clarity over Complexity**.
+
+The goal is to turn four distinct data streams into one "Go/No-Go" decision.
+
+---
+
+## 1. The "Conviction Gauge" (The Primary Visual)
+
+Instead of just a number, use a **Weighted Gauge** that changes color based on the  (Conviction Score) we defined earlier.
+
+* **0–30 (Red):** High Risk / Contrarian.
+* **31–70 (Yellow):** Neutral / Monitoring.
+* **71–100 (Green):** High Conviction Alignment.
+
+**Why this works:** It gives you a split-second "gut check" before you dive into the details.
+
+## 2. The "Signal Divergence" Radar
+
+This is where you visualize the **Whale vs. Social** conflict. Use a simple 4-quadrant grid:
+
+* **Quadrant 1 (Top Right):** Institutional & Retail Alignment (High Momentum).
+* **Quadrant 2 (Top Left):** **Smart Money Accumulation** (Whale Buying / Social Panic).
+* **Quadrant 3 (Bottom Right):** **Distribution Trap** (Whale Selling / Social Hype).
+* **Quadrant 4 (Bottom Left):** Market Exit (Both Selling).
+
+## 3. The "Tape" (Raw Evidence)
+
+To ensure there is **no hallucination**, provide a raw "Evidence Log" below the gauge so you can verify the data:
+
+* **Whale Log:** "10:04 AM - $2.4M Call Sweep - Strike $210 - Exp 3/20."
+* **Insider Log:** "Feb 12 - CEO Bought 50,000 shares (Code P) - $1.2M total."
+* **Social Log:** "Reddit Mentions: +410% in 1 hour. Keyword: 'Gamma Squeeze'."
+
+## 4. Technical Map (The Guardrail)
+
+Never place a trade without seeing where the "Floor" and "Ceiling" are. Your dashboard should overlay the current price against the automated S/R levels.
+
+---
+
+### Summary Dashboard Requirements (Functional Specs)
+
+| Widget | Data Frequency | Key Metric to Show |
+| --- | --- | --- |
+| **Conviction Score** | 1 Minute | Total  (0-100) |
+| **Whale Tracker** | Real-time | Net Delta (Puts vs. Calls Premium) |
+| **Insider Feed** | 10 Minutes | Transaction Code (P/S/G) & $ volume |
+| **Sentiment Pulse** | 15 Minutes | Mention Velocity (Spike vs. Average) |
+| **Technical Map** | Daily/Intraday | Distance to nearest Support/Resistance % |
+
+
+
+
+# Push Alert System
+
+To make this business-ready, the agent should have a **"Push Alert"** system. Do not wait for you to look at the dashboard.
+
+* **Trigger:** If  AND **Price is within 2% of Support**, send an immediate alert. This is your "Perfect Entry" factual signal.
+
 
 
