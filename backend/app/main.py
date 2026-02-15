@@ -497,7 +497,8 @@ def subscribe_page(request: Request) -> HTMLResponse:
     Uses the existing JSON POST /subscribe endpoint via fetch().
     """
 
-    host = str(request.url).split("?", 1)[0]
+    # Use relative POST to avoid accidentally hardcoding 127.0.0.1 or other internal hostnames.
+    endpoint = "/subscribe"
     html = f"""
 <!doctype html>
 <html>
@@ -569,7 +570,7 @@ def subscribe_page(request: Request) -> HTMLResponse:
       const form = document.getElementById('f');
       const emailEl = document.getElementById('email');
       const msg = document.getElementById('msg');
-      const endpoint = {json.dumps(host)};
+      const endpoint = {json.dumps(endpoint)};
 
       function setMsg(text, isErr=false) {{
         msg.textContent = text;
