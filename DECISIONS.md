@@ -130,3 +130,12 @@ Record decisions here so we can resume without re-deriving context.
 ## 2026-02-14 — Admin authentication (pilot)
 - Add a simple admin login flow (password-only) and protect all `/admin/*` endpoints when `WEALTHPULSE_ADMIN_PASSWORD` is set.
 - Token transport: `Authorization: Bearer <token>` stored in browser local storage (pilot simplicity).
+
+## 2026-02-15 — Cloud deploy (v0)
+- Deployment target: single VM (AWS/GCP neutral) using Docker Compose with:
+  - `web` (Caddy reverse proxy + static frontend)
+  - `backend` (FastAPI/Uvicorn)
+  - `db` (Postgres, containerized)
+- Public ports: expose **80** only (IP-only pilot); backend port **8000** remains internal.
+- Routing: `/api/*` is reverse-proxied to backend; `/subscribe`, `/confirm`, `/unsubscribe` are served by backend via proxy.
+- Subscription links: `WEALTHPULSE_PUBLIC_BASE_URL` must point to the public origin (no `:8000`).

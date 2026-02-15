@@ -233,6 +233,8 @@ After `docker compose up -d`:
 - Confirmation link uses the correct base URL (`WEALTHPULSE_PUBLIC_BASE_URL`)
 - Subscriber tab shows DB rows (Postgres persistence)
 
+For common issues and quick restart commands, see `TROUBLESHOOTING.md`.
+
 ## Deployment path (integrate changes without breaking)
 Keep deployments repeatable:
 1) Update code (or pull updated images)

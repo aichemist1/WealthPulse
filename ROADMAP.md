@@ -65,3 +65,10 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [ ] Backtesting harness + evaluation metrics
 - [ ] Vendor hardening (rate limits, retries, DLQ)
 - [ ] Performance tuning (caching, precompute, pagination)
+
+## Deployment & Ops (v0)
+- [x] Docker Compose deployment artifacts (web/backend/db; Postgres)
+- [x] Cloud-agnostic VM deploy script (SSH/rsync)
+- [x] AWS SSM deploy script (no inbound SSH)
+- [x] Troubleshooting guide (restart/logs/common issues)
+- [ ] Cron job spec + implementation for daily ingestion/snapshots/draft generation on VM

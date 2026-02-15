@@ -58,6 +58,13 @@ Goal: prove dashboard value with the fewest moving parts.
 - Scheduler: run from the backend in dev; production can use a simple cron later
 - No Redis/queues/microservices in v0
 
+## Deployment (v0)
+Cloud-agnostic v0 deployment uses:
+- One VM + Docker Compose
+- Containers: `web` (reverse proxy + static UI), `backend` (FastAPI), `db` (Postgres)
+- Only port **80** is public in the IP-only pilot (domain/TLS later)
+- Backend is private; all API calls go through `/api/*`
+
 ### Local dev constraints
 - Optimized for low CPU/RAM: one backend process + one frontend dev server + SQLite.
 - All computations produce an auditable daily snapshot so results are reproducible.
