@@ -106,7 +106,6 @@ def score_recommendations_from_13f(
     abs_rank = {r.ticker: i for i, r in enumerate(sorted_by_abs)}
     n = len(sorted_by_abs)
     max_rank = max(1, n - 1)
-    max_abs_delta = max(abs(r.delta_value_usd) for r in filtered) if filtered else 1
 
     out: list[RecommendationRow] = []
     for r in filtered:
@@ -145,13 +144,27 @@ def score_recommendations_from_13f(
 
         score = int(round(_clamp(base, 0.0, 100.0)))
 
-        # Confidence is deliberately capped because 13F is delayed.
-        conf = 0.20
-        conf += 0.15 * _clamp(log1p(r.manager_count) / log1p(25), 0.0, 1.0)
-        conf += 0.20 * _clamp(abs(r.delta_value_usd) / max_abs_delta, 0.0, 1.0)
+        # Confidence here means "signal reliability", not profit probability.
+        # 13F is delayed, so we keep confidence modest and base it primarily on:
+        # - data completeness (mapping coverage)
+        # - breadth/sample size (number of managers increasing)
+        # NOT on delta magnitude (which is directional strength, reflected by score).
+        conf_base = 0.15
+        conf_mgrs = 0.20 * _clamp(log1p(r.manager_count) / log1p(25), 0.0, 1.0)
+        conf_breadth = 0.10 * _clamp(breadth, 0.0, 1.0)
+        conf_size = 0.05 * _clamp(log1p(max(r.total_value_usd, 0)) / log1p(100_000_000_000), 0.0, 1.0)
+
+        conf_cov = 0.0
+        conf_cov_pen = 0.0
         if mapped_coverage_ratio is not None:
-            conf -= 0.15 * _clamp(0.10 - mapped_coverage_ratio, 0.0, 0.10) / 0.10
-        conf = float(_clamp(conf, 0.05, 0.65))
+            # Reward good mapping coverage; penalize very low coverage.
+            conf_cov = 0.15 * _clamp(mapped_coverage_ratio / 0.90, 0.0, 1.0)
+            conf_cov_pen = 0.10 * _clamp(0.20 - mapped_coverage_ratio, 0.0, 0.20) / 0.20
+
+        conf_sample_pen = 0.05 if r.manager_count < 3 else 0.0
+
+        conf_raw = conf_base + conf_mgrs + conf_breadth + conf_size + conf_cov - conf_cov_pen - conf_sample_pen
+        conf = float(_clamp(conf_raw, 0.05, 0.55))
 
         # Action: v0 uses 13F-only signal, so default to Watch.
         action = "watch"
@@ -174,6 +187,18 @@ def score_recommendations_from_13f(
                     "mapped_coverage_ratio": mapped_coverage_ratio,
                 },
             },
+            "confidence_breakdown": {
+                "note": "Confidence is signal reliability (freshness + corroboration + completeness), not expected return. 13F is delayed; confidence is capped.",
+                "base": conf_base,
+                "managers": conf_mgrs,
+                "breadth": conf_breadth,
+                "size": conf_size,
+                "coverage_boost": conf_cov,
+                "coverage_penalty": conf_cov_pen,
+                "sample_penalty": conf_sample_pen,
+                "final": conf,
+            },
+            "conviction_1_10": int((score + 9) // 10),
         }
 
         out.append(

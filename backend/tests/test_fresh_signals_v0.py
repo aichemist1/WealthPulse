@@ -21,6 +21,8 @@ def test_fresh_signal_buy_when_sc13_insider_and_bullish_trend() -> None:
             volume={"avg20": 10_000_000.0, "latest": 25_000_000.0, "ratio": 2.5, "spike": True},
             volume_spike=True,
             context_13f=None,
+            market=None,
+            sector=None,
         ),
         params=params,
     )
@@ -48,9 +50,48 @@ def test_fresh_signal_avoid_when_big_sell_and_bearish_trend() -> None:
             volume=None,
             volume_spike=False,
             context_13f=None,
+            market=None,
+            sector=None,
         ),
         params=params,
     )
     assert row.action == "avoid"
     assert row.direction == "bearish"
     assert row.score <= params.avoid_score_threshold
+
+
+def test_fresh_signal_social_persistent_spike_adjusts_score() -> None:
+    params = FreshSignalParams(as_of=datetime(2026, 2, 11, 23, 59, 59))
+    row = score_fresh_signal_v0(
+        features=FreshSignalFeatures(
+            ticker="SOC",
+            sc13_count=0,
+            sc13_latest_filed_at=None,
+            insider_buy_value=0.0,
+            insider_sell_value=0.0,
+            insider_buy_count=0,
+            insider_sell_count=0,
+            insider_latest_event_date=None,
+            trend=None,
+            trend_bullish_recent=False,
+            trend_bearish_recent=False,
+            volume=None,
+            volume_spike=False,
+            context_13f=None,
+            market=None,
+            sector=None,
+            social={
+                "enabled": True,
+                "mentions_latest": 20,
+                "mentions_baseline_7d": 6.0,
+                "velocity": 3.33,
+                "persistent": True,
+                "sentiment_hint": 0.4,
+                "velocity_threshold": 1.5,
+                "min_mentions": 5,
+            },
+        ),
+        params=params,
+    )
+    assert row.score >= 54
+    assert float((row.reasons.get("social_adjustment") or {}).get("score") or 0.0) >= 4.0

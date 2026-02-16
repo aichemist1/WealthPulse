@@ -215,7 +215,9 @@ def render_daily_email_v0(*, session: Session, run: AlertRun, unsubscribe_url: s
     lines.append(f"As of: {run.as_of.isoformat()}")
     lines.append("")
     for i, it in enumerate(items, start=1):
-        lines.append(f"{i}. {it.ticker} — {it.action.upper()} (score {it.score}, conf {int(it.confidence*100)}%)")
+        score10 = int((int(it.score or 0) + 9) // 10)
+        score10 = max(1, min(10, score10))
+        lines.append(f"{i}. {it.ticker} — {it.action.upper()} (score {score10}/10, conf {int(it.confidence*100)}%)")
         for w in (it.why or [])[:4]:
             lines.append(f"   - {w}")
     lines.append("")
@@ -255,7 +257,9 @@ def render_daily_email_plain_v0(
 
     def _row(it: AlertItem) -> str:
         conf_pct = int(round(float(it.confidence or 0.0) * 100))
-        return f"{it.ticker}\t{it.action.upper()}\t{int(it.score)}\t{conf_pct}%"
+        score10 = int((int(it.score or 0) + 9) // 10)
+        score10 = max(1, min(10, score10))
+        return f"{it.ticker}\t{it.action.upper()}\t{score10}\t{conf_pct}%"
 
     lines: list[str] = []
     lines.append("WealthPulse Daily Signals")
@@ -265,7 +269,7 @@ def render_daily_email_plain_v0(
     if not items:
         lines.append("No BUY/SELL signals met today's thresholds.")
     else:
-        lines.append("Ticker\tAction\tScore\tConf")
+        lines.append("Ticker\tAction\tScore(1-10)\tConf")
         for it in items:
             lines.append(_row(it))
         lines.append("")

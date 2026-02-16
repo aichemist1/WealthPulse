@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     watchlist_etfs: str = "GLD,AIQ,QTUM,SKYY,MAGS,JTEK,ARKW,CHAT,HACK"
     watchlist_dividend_stocks: str = "VNOM,SLB,EOG"
 
+    # Optional social listener (v0.1, feature-flagged)
+    social_enabled: bool = False
+    social_velocity_threshold: float = 1.5
+    social_min_mentions: int = 5
+    social_reddit_enabled: bool = False
+    social_reddit_subreddits: str = "wallstreetbets,stocks,investing,options"
+    social_reddit_listing: str = "new"
+    social_reddit_limit_per_subreddit: int = 100
+    social_reddit_bucket_minutes: int = 15
+    social_reddit_allow_plain_upper: bool = False
+    social_reddit_source_label: str = "reddit"
+
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Subscriber alerts (pilot): SMTP email

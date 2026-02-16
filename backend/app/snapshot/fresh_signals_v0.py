@@ -8,10 +8,12 @@ from typing import Optional
 from sqlmodel import Session, select
 from sqlmodel import col
 
-from app.models import InsiderTx, LargeOwnerFiling, PriceBar, Security, Snapshot13FWhale, SnapshotRun
+from app.models import InsiderTx, InsiderTxMeta, LargeOwnerFiling, PriceBar, Security, Snapshot13FWhale, SnapshotRun, SocialSignal
+from app.settings import settings
 from app.snapshot.market_regime import compute_market_regime
 from app.snapshot.sector_regime import compute_sector_regimes
-from app.snapshot.trend import compute_trend_from_closes
+from app.snapshot.tech_guardrail_v0 import apply_tech_guardrail_v0
+from app.snapshot.trend import compute_technical_snapshot_from_closes
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,13 @@ class FreshSignalFeatures:
 
     sector: Optional[dict]
 
+    insider_buy_value_10b5: float = 0.0
+    insider_sell_value_10b5: float = 0.0
+    insider_buy_count_10b5: int = 0
+    insider_sell_count_10b5: int = 0
+    insider_cluster_buy_insiders: int = 0
+    social: Optional[dict] = None
+
 
 def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalParams) -> FreshSignalRow:
     # Score components (0..100), centered at 50 (neutral).
@@ -91,7 +100,10 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
         score += 45.0 + min(15.0, 5.0 * min(features.sc13_count, 3))
 
     # Insider: net buy/sell magnitude.
-    net = features.insider_buy_value - features.insider_sell_value
+    # Discretionary transactions carry full weight; 10b5-1 (scheduled) carry reduced weight.
+    net = (features.insider_buy_value - features.insider_sell_value) + 0.20 * (
+        features.insider_buy_value_10b5 - features.insider_sell_value_10b5
+    )
     net_mag = log1p(abs(net) / 1_000_000.0) / log1p(100.0)  # ~0..1 for 0..$100M
     net_component = 25.0 * _clamp(net_mag, 0.0, 1.0)
     if net > 0:
@@ -137,7 +149,37 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
             sector_score_adj = +1.0
     score += sector_score_adj
 
+    # Social listener (optional, feature-flagged): cashtag velocity with persistence.
+    social_score_adj = 0.0
+    social_conf_adj = 0.0
+    if features.social and bool(features.social.get("enabled")):
+        velocity = float(features.social.get("velocity") or 0.0)
+        persistent = bool(features.social.get("persistent"))
+        mentions_latest = int(features.social.get("mentions_latest") or 0)
+        min_mentions = int(features.social.get("min_mentions") or 0)
+        sentiment_hint = features.social.get("sentiment_hint")
+        sentiment = float(sentiment_hint) if sentiment_hint is not None else None
+        if persistent and velocity >= float(features.social.get("velocity_threshold") or 0.0) and mentions_latest >= min_mentions:
+            if sentiment is None or sentiment >= 0:
+                social_score_adj = +4.0
+                social_conf_adj = +0.04
+            else:
+                social_score_adj = -4.0
+                social_conf_adj = -0.04
+        elif velocity >= float(features.social.get("velocity_threshold") or 0.0) and mentions_latest >= min_mentions:
+            # One-window spike: weaker confidence effect than a persistent spike.
+            social_score_adj = +1.0 if (sentiment is None or sentiment >= 0) else -1.0
+            social_conf_adj = -0.01
+    score += social_score_adj
+
     score_i = int(round(_clamp(score, 0.0, 100.0)))
+    tg = apply_tech_guardrail_v0(score=score_i, tech=features.trend)
+    score_i = tg.score_after
+
+    # Cluster discretionary buys are a higher-quality insider signal.
+    if features.insider_cluster_buy_insiders >= 3 and features.insider_buy_value >= params.insider_min_value:
+        score_i = int(round(_clamp(float(score_i) + 5.0, 0.0, 100.0)))
+
     conviction_1_10 = int((score_i + 9) // 10)
 
     # Direction + action
@@ -147,17 +189,61 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
     if features.trend_bearish_recent or net < 0:
         direction = "bearish" if direction == "neutral" else direction
 
+    insider_dir = "neutral"
+    if net > 0:
+        insider_dir = "bullish"
+    elif net < 0:
+        insider_dir = "bearish"
+    trend_dir = "bullish" if features.trend_bullish_recent else ("bearish" if features.trend_bearish_recent else "neutral")
+
+    divergence_score_adj = 0
+    divergence_conf_adj = 0.0
+    divergence_label = "none"
+    divergence_note = "signals are neutral/mixed"
+    if insider_dir == "bullish" and trend_dir == "bearish":
+        divergence_label = "bullish_divergence"
+        divergence_note = "insider accumulation while trend is bearish"
+        divergence_score_adj = +3
+        divergence_conf_adj = -0.03
+    elif insider_dir == "bearish" and trend_dir == "bullish":
+        divergence_label = "bearish_divergence"
+        divergence_note = "insider selling against bullish trend"
+        divergence_score_adj = -8
+        divergence_conf_adj = -0.08
+    elif features.sc13_count > 0 and trend_dir == "bearish":
+        divergence_label = "sc13_trend_conflict"
+        divergence_note = "SC13 filing present but price trend is bearish"
+        divergence_score_adj = -4
+        divergence_conf_adj = -0.06
+    elif insider_dir != "neutral" and insider_dir == trend_dir:
+        divergence_label = "alignment"
+        divergence_note = "insider flow and trend are aligned"
+        divergence_score_adj = +1
+        divergence_conf_adj = +0.02
+
+    if divergence_score_adj != 0:
+        score_i = int(round(_clamp(float(score_i + divergence_score_adj), 0.0, 100.0)))
+
     has_fresh_event = (
         features.sc13_count > 0
         or features.insider_buy_value >= params.insider_min_value
         or features.insider_sell_value >= params.insider_min_value
+        or features.insider_buy_value_10b5 >= params.insider_min_value
+        or features.insider_sell_value_10b5 >= params.insider_min_value
     )
     action = "watch"
-    if score_i >= params.buy_score_threshold and has_fresh_event and (features.trend_bullish_recent or net > 0):
+    # BUY should prefer discretionary signals; 10b5-1-only setups should rarely upgrade to BUY.
+    strong_insider_buy = features.insider_buy_value >= params.insider_min_value
+    if score_i >= params.buy_score_threshold and has_fresh_event and (features.trend_bullish_recent or net > 0) and (
+        features.sc13_count > 0 or strong_insider_buy or features.trend_bullish_recent or net > 0
+    ):
         action = "buy"
     elif score_i <= params.avoid_score_threshold and has_fresh_event and (
         features.trend_bearish_recent or (net < 0 and not features.trend_bullish_recent)
     ):
+        action = "avoid"
+    elif divergence_label == "bearish_divergence" and score_i <= (params.avoid_score_threshold + 5):
+        # Escalate risk classification when insider flow strongly contradicts bullish price trend.
         action = "avoid"
 
     # Confidence (signal reliability, not profit probability)
@@ -166,8 +252,14 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
         conf += 0.25
     if features.insider_buy_value >= params.insider_min_value:
         conf += 0.20
+    elif features.insider_buy_value_10b5 >= params.insider_min_value:
+        conf += 0.05
     if features.insider_sell_value >= params.insider_min_value:
         conf += 0.10
+    elif features.insider_sell_value_10b5 >= params.insider_min_value:
+        conf += 0.02
+    if features.insider_cluster_buy_insiders >= 3 and features.insider_buy_value >= params.insider_min_value:
+        conf += 0.15
     if features.trend is not None and (features.trend_bullish_recent or features.trend_bearish_recent):
         conf += 0.15
     if features.volume_spike:
@@ -191,14 +283,9 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
         elif features.sector.get("bullish_recent"):
             sector_conf_adj = +0.01
     conf += sector_conf_adj
+    conf += social_conf_adj
 
-    # Penalize conflicting setup: strong fresh event but trend opposite.
-    if features.sc13_count > 0 and features.trend_bearish_recent:
-        conf -= 0.10
-    if (features.insider_buy_value > features.insider_sell_value) and features.trend_bearish_recent:
-        conf -= 0.05
-    if (features.insider_sell_value > features.insider_buy_value) and features.trend_bullish_recent:
-        conf -= 0.05
+    conf += divergence_conf_adj
 
     conf_f = float(_clamp(conf, 0.10, 0.90))
 
@@ -214,16 +301,44 @@ def score_fresh_signal_v0(*, features: FreshSignalFeatures, params: FreshSignalP
             "net_value": net,
             "buy_count": features.insider_buy_count,
             "sell_count": features.insider_sell_count,
+            "buy_value_10b5": features.insider_buy_value_10b5,
+            "sell_value_10b5": features.insider_sell_value_10b5,
+            "buy_count_10b5": features.insider_buy_count_10b5,
+            "sell_count_10b5": features.insider_sell_count_10b5,
+            "cluster_buy_insiders": features.insider_cluster_buy_insiders,
             "latest_event_date": features.insider_latest_event_date,
+        },
+        "insider_quality_policy": {
+            "codes_high_signal": ["P", "S"],
+            "codes_ignored": ["A", "M", "G"],
+            "planned_trade_weight": 0.20,
+            "cluster_buy_rule": ">=3 distinct insiders with discretionary P in fresh window",
         },
         "trend": features.trend,
         "trend_flags": {"bullish_recent": features.trend_bullish_recent, "bearish_recent": features.trend_bearish_recent},
+        "tech_guardrail": {
+            "ft": tg.ft,
+            "adj": tg.adj,
+            "score_before": tg.score_before,
+            "score_after": tg.score_after,
+            "notes": tg.notes,
+        },
         "volume": features.volume,
         "context_13f": features.context_13f,
         "market": features.market,
         "market_adjustment": {"score": market_score_adj, "confidence": market_conf_adj},
         "sector": features.sector,
         "sector_adjustment": {"score": sector_score_adj, "confidence": sector_conf_adj},
+        "social": features.social,
+        "social_adjustment": {"score": social_score_adj, "confidence": social_conf_adj},
+        "divergence": {
+            "label": divergence_label,
+            "insider_direction": insider_dir,
+            "trend_direction": trend_dir,
+            "score_adjustment": divergence_score_adj,
+            "confidence_adjustment": divergence_conf_adj,
+            "note": divergence_note,
+        },
         "conviction_1_10": conviction_1_10,
     }
 
@@ -290,10 +405,13 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
             InsiderTx.shares,
             InsiderTx.price,
             InsiderTx.insider_name,
+            InsiderTx.insider_cik,
+            InsiderTxMeta.is_10b5_1,
             InsiderTx.event_date,
             InsiderTx.filed_at,
             InsiderTx.source_accession,
         )
+        .join(InsiderTxMeta, col(InsiderTxMeta.insider_tx_id) == col(InsiderTx.id), isouter=True)
         .where(InsiderTx.event_date != None)  # noqa: E711
         .where(InsiderTx.event_date >= fresh_start)
         .where(col(InsiderTx.is_derivative) == False)  # noqa: E712
@@ -309,6 +427,58 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
     tickers = sorted(set(sc13_by_ticker.keys()) | set(insider_events_by_ticker.keys()))
     if not tickers:
         return []
+
+    # Optional social listener (feature-flagged): cashtag bucket velocity + persistence.
+    social_by_ticker: dict[str, dict] = {}
+    if settings.social_enabled:
+        social_start = params.as_of - timedelta(days=7)
+        social_rows = list(
+            session.exec(
+                select(
+                    SocialSignal.ticker,
+                    SocialSignal.bucket_start,
+                    SocialSignal.mentions,
+                    SocialSignal.sentiment_hint,
+                    SocialSignal.source,
+                )
+                .where(col(SocialSignal.ticker).in_(tickers))
+                .where(col(SocialSignal.bucket_start) >= social_start)
+                .where(col(SocialSignal.bucket_start) <= params.as_of)
+                .order_by(col(SocialSignal.ticker), col(SocialSignal.bucket_start).desc())
+            ).all()
+        )
+        grouped: dict[str, list[tuple]] = {}
+        for row in social_rows:
+            grouped.setdefault(str(row[0]).upper(), []).append(row)
+        for t, rows in grouped.items():
+            if not rows:
+                continue
+            latest_mentions = int(rows[0][2] or 0)
+            latest_bucket = rows[0][1]
+            latest_sentiment = rows[0][3]
+            source = rows[0][4]
+            prev_mentions = [int(r[2] or 0) for r in rows[1:]]
+            baseline = (sum(prev_mentions) / len(prev_mentions)) if prev_mentions else None
+            velocity = (latest_mentions / baseline) if (baseline and baseline > 0) else None
+            # Two-window persistence rule: latest and previous bucket both above threshold.
+            threshold = float(settings.social_velocity_threshold)
+            persistent = False
+            if baseline and baseline > 0 and len(rows) >= 2:
+                m0 = int(rows[0][2] or 0)
+                m1 = int(rows[1][2] or 0)
+                persistent = (m0 >= threshold * baseline) and (m1 >= threshold * baseline)
+            social_by_ticker[t] = {
+                "enabled": True,
+                "source": source,
+                "latest_bucket_start": latest_bucket.isoformat() if latest_bucket else None,
+                "mentions_latest": latest_mentions,
+                "mentions_baseline_7d": baseline,
+                "velocity": velocity,
+                "persistent": persistent,
+                "sentiment_hint": float(latest_sentiment) if latest_sentiment is not None else None,
+                "velocity_threshold": threshold,
+                "min_mentions": int(settings.social_min_mentions),
+            }
 
     # Optional 13F context (delayed): latest 13f_whales snapshot mapped by ticker.
     whale_by_ticker: dict[str, dict] = {}
@@ -369,44 +539,29 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
             dates = [d for (d, _, _) in bars]
             closes = [float(c) for (_, c, _) in bars]
             vols = [v for (_, _, v) in bars]
-            tm = compute_trend_from_closes(dates=dates, closes=closes)
             vol = _compute_volume_spike(volumes=vols)
-            ret60 = None
-            if len(closes) >= 61:
-                prev = closes[-61]
-                if prev:
-                    ret60 = (closes[-1] / prev) - 1.0
-            sma200 = None
-            if len(closes) >= 200:
-                sma200 = sum(closes[-200:]) / 200.0
-
-            trend_obj = {
-                "as_of_date": tm.as_of_date,
-                "close": tm.close,
-                "sma50": tm.sma50,
-                "sma200": sma200,
-                "return_20d": tm.return_20d,
-                "return_60d": ret60,
-                "bullish": tm.bullish,
-            }
+            trend_obj = compute_technical_snapshot_from_closes(dates=dates, closes=closes)
             vol_obj = vol
             close_by_date = {d: float(c) for (d, c, _) in bars}
             sorted_dates = [d for (d, _, _) in bars]
 
             # "recent" = last bar within 3 calendar days of as_of (weekends/holidays).
             is_recent = False
-            if tm.as_of_date:
+            if trend_obj.get("as_of_date"):
                 try:
-                    y, m, d = (int(x) for x in tm.as_of_date.split("-"))
+                    y, m, d = (int(x) for x in str(trend_obj.get("as_of_date")).split("-"))
                     last_day = datetime(y, m, d).date()
                     delta_days = (params.as_of.date() - last_day).days
                     is_recent = 0 <= delta_days <= 3
                 except Exception:
                     is_recent = False
 
-            if is_recent and tm.sma50 is not None and tm.return_20d is not None and tm.close is not None:
-                trend_bullish_recent = tm.close > tm.sma50 and tm.return_20d > 0
-                trend_bearish_recent = tm.close < tm.sma50 and tm.return_20d < 0
+            if is_recent and trend_obj.get("sma50") is not None and trend_obj.get("return_20d") is not None and trend_obj.get("close") is not None:
+                c = float(trend_obj["close"])
+                s50 = float(trend_obj["sma50"])
+                r20 = float(trend_obj["return_20d"])
+                trend_bullish_recent = c > s50 and r20 > 0
+                trend_bearish_recent = c < s50 and r20 < 0
         else:
             close_by_date = {}
             sorted_dates = []
@@ -425,11 +580,28 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
         sell_value = 0.0
         buy_count = 0
         sell_count = 0
+        buy_value_10b5 = 0.0
+        sell_value_10b5 = 0.0
+        buy_count_10b5 = 0
+        sell_count_10b5 = 0
+        cluster_buy_insiders: set[str] = set()
         latest_event_date: Optional[datetime] = None
         estimated_value_count = 0
         qualifying_txs: list[dict] = []
 
-        for (_t, code, tx_value, shares, price, insider_name, event_dt, filed_at, source_accession) in insider_events_by_ticker.get(t, []):
+        for (
+            _t,
+            code,
+            tx_value,
+            shares,
+            price,
+            insider_name,
+            insider_cik,
+            is_10b5_1,
+            event_dt,
+            filed_at,
+            source_accession,
+        ) in insider_events_by_ticker.get(t, []):
             if event_dt is None:
                 continue
             code_u = (code or "").upper().strip()
@@ -456,12 +628,25 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
             if value is None or value < params.insider_min_value:
                 continue
 
+            is_10b5 = bool(is_10b5_1) if is_10b5_1 is not None else False
             if code_u == "P":
-                buy_value += value
-                buy_count += 1
+                if is_10b5:
+                    buy_value_10b5 += value
+                    buy_count_10b5 += 1
+                else:
+                    buy_value += value
+                    buy_count += 1
+                    if insider_cik:
+                        cluster_buy_insiders.add(str(insider_cik))
+                    elif insider_name:
+                        cluster_buy_insiders.add(str(insider_name))
             else:
-                sell_value += value
-                sell_count += 1
+                if is_10b5:
+                    sell_value_10b5 += value
+                    sell_count_10b5 += 1
+                else:
+                    sell_value += value
+                    sell_count += 1
 
             if latest_event_date is None or event_dt > latest_event_date:
                 latest_event_date = event_dt
@@ -474,6 +659,8 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
                     "price": float(price) if price is not None else None,
                     "estimated": estimated,
                     "insider_name": insider_name,
+                    "insider_cik": insider_cik,
+                    "is_10b5_1": is_10b5_1,
                     "event_date": event_dt.isoformat() if event_dt else None,
                     "filed_at": filed_at.isoformat() if filed_at else None,
                 }
@@ -481,7 +668,7 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
 
         # If no qualifying events and no SC13, skip.
         sc13_count = int(sc13.get("count") or 0)
-        if sc13_count == 0 and buy_count == 0 and sell_count == 0:
+        if sc13_count == 0 and (buy_count + sell_count + buy_count_10b5 + sell_count_10b5) == 0:
             continue
 
         vol_spike = bool(vol_obj and vol_obj.get("spike") is True)
@@ -497,6 +684,12 @@ def compute_fresh_signals_v0(*, session: Session, params: FreshSignalParams) -> 
                 insider_buy_count=buy_count,
                 insider_sell_count=sell_count,
                 insider_latest_event_date=(latest_event_date.isoformat() if latest_event_date else None),
+                insider_buy_value_10b5=buy_value_10b5,
+                insider_sell_value_10b5=sell_value_10b5,
+                insider_buy_count_10b5=buy_count_10b5,
+                insider_sell_count_10b5=sell_count_10b5,
+                insider_cluster_buy_insiders=len(cluster_buy_insiders),
+                social=social_by_ticker.get(str(t).upper()),
                 trend=trend_obj,
                 trend_bullish_recent=trend_bullish_recent,
                 trend_bearish_recent=trend_bearish_recent,

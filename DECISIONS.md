@@ -139,3 +139,110 @@ Record decisions here so we can resume without re-deriving context.
 - Public ports: expose **80** only (IP-only pilot); backend port **8000** remains internal.
 - Routing: `/api/*` is reverse-proxied to backend; `/subscribe`, `/confirm`, `/unsubscribe` are served by backend via proxy.
 - Subscription links: `WEALTHPULSE_PUBLIC_BASE_URL` must point to the public origin (no `:8000`).
+
+## 2026-02-15 — Insider quality filtering (v0.1 design)
+- Add an “Insider Quality Filter” layer for Form 4 to reduce noise and improve explainability:
+  - Transaction codes:
+    - Treat **`P` (open market purchase)** as the primary bullish insider signal.
+    - Treat **`S` (open market sale)** as bearish/risk (context-aware; do not force `avoid` if trend is strongly bullish).
+    - Ignore common non-informative codes for scoring: **`A` (grant/award)**, **`M` (exercise/conversion)**, **`G` (gift)**.
+  - If the Form 4 indicates a **10b5-1 plan trade**, downweight intent (scheduled) relative to discretionary trades.
+  - Add **cluster buy** detection (≥3 distinct insiders with `P` within a short window) as a confidence booster.
+
+## 2026-02-15 — Listener model + refresh lanes (v0.1 design)
+- Adopt a “three listeners” operational model to keep the backend modular and the scoring explainable:
+  - **Auditor:** SEC filings (Form 4 + SC 13D/13G) → normalized evidence + corroborators + quality filters.
+  - **Mapmaker:** price-derived technicals (SMA50/SMA200, simple support/resistance) → guardrail multiplier/penalty.
+  - **Listener (optional):** social cashtag velocity (Reddit/X) with persistence/cooldown to reduce noise.
+- Refresh frequency becomes “lanes” (cost control):
+  - Mapmaker: **15–60 min during market hours** (pilot default; not high-frequency).
+  - Auditor: **10–30 min best-effort weekdays** with backoff to avoid EDGAR blocks.
+  - Social Listener: **10–15 min** (optional; feature-flagged until sources are chosen).
+  - Fundamentals/static: **daily**.
+- Scheduling remains minimal: on-demand in dev; **cron** on the VM calling existing CLI commands in prod.
+
+## 2026-02-15 — Mapmaker technical guardrails (v0.1 implementation)
+- Expanded the trend payload to include a lightweight technical snapshot:
+  - SMA50/SMA200, 20D/60D return, 60D high/low proximity, and derived distance-to-level fields.
+- Added a “technical guardrail” layer that applies a small **Ft multiplier/penalty** to reduce chasing:
+  - Boosts slightly when near SMA50 support in a bullish setup.
+  - Penalizes when extended above SMA50 and/or near the 60D high.
+  - Adds a small penalty when below SMA200 in non-bullish setups.
+- Stored breakdown in `reasons.tech_guardrail` for explainability and surfaced it in the detail drawer.
+
+## 2026-02-15 — Auditor insider quality filter (v0.1 implementation)
+- Added Form 4 10b5-1 parsing from XML (`aff10b5One`) and persisted per-transaction metadata in `insider_tx_meta`.
+- Fresh Signals scoring now distinguishes discretionary vs planned insider transactions:
+  - `P/S` discretionary carries full signal weight.
+  - 10b5-1 `P/S` is downweighted (reliability + score contribution reduced).
+  - `A/M/G` remain non-signal for scoring (query/scoring path remains focused on `P/S`).
+- Added cluster buy detection in Fresh Signals:
+  - Rule: at least 3 distinct insiders with discretionary `P` in the fresh window.
+  - Effect: confidence boost + small score bonus.
+- Top Picks corroborator now excludes 10b5-1 planned buys from “fresh insider buy” gating.
+- UI drawer now surfaces insider quality fields:
+  - 10b5-1 buy/sell totals + counts
+  - cluster-buy yes/no + insider count
+
+## 2026-02-15 — Divergence/conflict weighting (v0.1 implementation)
+- Added explicit divergence modeling in Fresh Signals between insider flow and technical trend:
+  - `bullish_divergence`: insider bullish while trend bearish (small positive score, confidence penalty).
+  - `bearish_divergence`: insider bearish while trend bullish (larger negative score, confidence penalty).
+  - `sc13_trend_conflict`: SC13 present while trend bearish (negative score/confidence adjustment).
+  - `alignment`: insider and trend agree (small score/confidence boost).
+- Applied divergence adjustments directly into score and confidence; stored in `reasons.divergence` for explainability.
+- Added conservative avoid escalation when bearish divergence is present near the avoid threshold.
+- Admin drawer now includes a dedicated Divergence block (type, directions, score/confidence adjustments, note).
+
+## 2026-02-15 — Social listener (v0.1 implementation, feature-flagged)
+- Added feature flags/settings:
+  - `WEALTHPULSE_SOCIAL_ENABLED` (default false)
+  - `WEALTHPULSE_SOCIAL_VELOCITY_THRESHOLD` (default 1.5)
+  - `WEALTHPULSE_SOCIAL_MIN_MENTIONS` (default 5)
+- Added `social_signals` table and CLI ingestion path:
+  - `python -m app.cli ingest-social-signals-csv --csv-file <path>`
+  - source is CSV/manual for pilot; no external provider dependency in v0.1.
+- Fresh Signals scorer now optionally consumes social evidence:
+  - uses mention velocity vs 7-day baseline
+  - requires 2-bucket persistence for stronger effect
+  - applies small score/confidence adjustments and stores details in `reasons.social` + `reasons.social_adjustment`
+- UI drawer shows Social listener block when social evidence is present.
+- Added operator tooling for faster pilot validation:
+  - sample generator script: `scripts/generate_social_sample_csv.sh` (writes `/tmp/wealthpulse_social_sample.csv` by default)
+  - Runs tab “Social Coverage” card backed by `/admin/social/coverage` (enabled flag, latest bucket, 24h rows/tickers, top mentioned tickers)
+- Added Reddit live-ingest adapter (first external social source):
+  - CLI: `python -m app.cli ingest-social-reddit`
+  - default subreddits: `wallstreetbets,stocks,investing,options`
+  - default extraction is strict cashtag mode (`$TICKER`) to reduce false positives
+  - stores buckets in `social_signals` with source label `reddit:<subreddit>`
+  - designed so X/Twitter listener can plug into the same `social_signals` schema later
+
+## 2026-02-15 — Segment eligibility + primary selection (v0.1 implementation)
+- Reworked Themes segmentation to use **per-ticker eligibility strength** instead of static first-match bucket assignment.
+- For each ticker, the system now computes eligible segment candidates (`insider`, `activist`, `institutional`, `momentum`, `risk`) from Fresh Signals + Top Picks evidence, then chooses one primary segment.
+- Added conservative Risk override rule: Risk becomes primary only when bearish strength is materially higher than the best non-risk candidate.
+- Maintains “one ticker, one segment” while improving bucket relevance and reducing misleading priority artifacts.
+- Endpoint payload now includes `meta.selection=eligibility_strength_primary_segment` for traceability.
+
+## 2026-02-15 — Daily snapshot artifact (versioned/auditable)
+- Added persistent `daily_snapshot_artifacts` table to store reproducible daily outputs.
+- Added CLI command:
+  - `python -m app.cli snapshot-daily-artifact-v0 --as-of <ISO>`
+  - builds canonical payload from latest `recommendations_v0`, `fresh_signals_v0`, and `segments_v0`.
+- Artifact payload is canonical-hashed (`sha256`) to support dedupe/replay and future backtest baselines.
+- Added admin read endpoint:
+  - `GET /admin/artifacts/daily/latest` for quick inspection/export.
+
+## 2026-02-15 — Basic backtest harness (v0)
+- Added snapshot backtest engine for `recommendations_v0` and `fresh_signals_v0` against a baseline ticker (default `SPY`).
+- Added CLI:
+  - `python -m app.cli backtest-snapshots-v0 --start-as-of YYYY-MM-DD --end-as-of YYYY-MM-DD`
+  - horizons default to `5,20` trading days; evaluates top buy/avoid rows per run.
+- Metrics include:
+  - evaluated coverage
+  - average ticker return vs baseline return
+  - average excess return
+  - hit rate vs baseline (`buy`: ticker > baseline, `avoid`: ticker < baseline)
+- Persists auditable backtest artifacts in `backtest_runs` and exposes latest via:
+  - `GET /admin/backtests/latest`
+- Admin Runs tab now includes a read-only Backtest card (coverage, hit-rate, excess return) sourced from latest backtest artifact.

@@ -151,6 +151,27 @@ class InsiderTx(SQLModel, table=True):
     )
 
 
+class InsiderTxMeta(SQLModel, table=True):
+    """
+    Per-transaction metadata that we may want to evolve without ALTERing InsiderTx often.
+    (Keeps schema changes incremental in a pilot.)
+    """
+
+    __tablename__ = "insider_tx_meta"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    insider_tx_id: str = Field(foreign_key="insider_txs.id", index=True)
+
+    is_10b5_1: Optional[bool] = Field(default=None, index=True)
+
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("insider_tx_id", name="uq_insider_tx_meta_tx"),
+        Index("ix_insider_tx_meta_10b5", "is_10b5_1"),
+    )
+
+
 class SnapshotRun(SQLModel, table=True):
     __tablename__ = "snapshot_runs"
 
@@ -339,6 +360,29 @@ class PriceBar(SQLModel, table=True):
     )
 
 
+class SocialSignal(SQLModel, table=True):
+    """
+    Lightweight social/cashtag signal buckets.
+    Source can be CSV/manual in pilot; provider integration can be added later.
+    """
+
+    __tablename__ = "social_signals"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    ticker: str = Field(index=True)
+    bucket_start: datetime = Field(index=True)
+    bucket_minutes: int = Field(default=15, index=True)
+    mentions: int = Field(default=0, index=True)
+    sentiment_hint: Optional[float] = Field(default=None, index=True)  # -1..1 if available
+    source: str = Field(default="manual_csv", index=True)
+    detected_at: datetime = Field(default_factory=utcnow, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "bucket_start", "bucket_minutes", "source", name="uq_social_signal_bucket"),
+        Index("ix_social_signal_ticker_bucket", "ticker", "bucket_start"),
+    )
+
+
 class DividendMetrics(SQLModel, table=True):
     """
     Best-effort dividend/yield fundamentals for curated income watchlists.
@@ -515,3 +559,47 @@ class AdminSetting(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
     __table_args__ = (UniqueConstraint("key", name="uq_admin_settings_key"),)
+
+
+class DailySnapshotArtifact(SQLModel, table=True):
+    """
+    Versioned, auditable daily snapshot payload for reproducibility/backtests.
+    """
+
+    __tablename__ = "daily_snapshot_artifacts"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    kind: str = Field(default="daily_snapshot_v0", index=True)
+    as_of: datetime = Field(index=True)
+    version: str = Field(default="v0.1", index=True)
+    artifact_hash: str = Field(index=True)
+
+    source_runs: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("kind", "as_of", "version", "artifact_hash", name="uq_daily_snapshot_artifact_hash"),
+        Index("ix_daily_snapshot_artifact_as_of_created", "as_of", "created_at"),
+    )
+
+
+class BacktestRun(SQLModel, table=True):
+    """
+    Basic backtest artifact for snapshot recommendation performance.
+    """
+
+    __tablename__ = "backtest_runs"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    kind: str = Field(default="backtest_v0", index=True)
+    started_at: datetime = Field(default_factory=utcnow, index=True)
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+
+    params: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    summary: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    __table_args__ = (
+        Index("ix_backtest_run_kind_started", "kind", "started_at"),
+        Index("ix_backtest_run_completed", "completed_at"),
+    )

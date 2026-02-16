@@ -5,8 +5,10 @@ import {
   setAdminToken,
   type AdminMetrics,
   type Latest13FWhales,
+  type LatestBacktestRun,
   type LatestInsiderWhales,
   type LatestSegments,
+  type SocialCoverage,
   type WatchlistRows,
 } from "./api";
 import { Money, Percent } from "./format";
@@ -16,6 +18,17 @@ type LoadState<T> = { status: "idle" | "loading" | "error" | "ok"; data?: T; err
 
 type Tab = "latest" | "runs" | "subscribers";
 
+function clampInt(x: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, x));
+}
+
+function scoreTo10(score0to100: number, reasons?: Record<string, unknown>): number {
+  const fromReasons = Number((reasons as any)?.conviction_1_10);
+  if (!Number.isNaN(fromReasons) && fromReasons > 0) return clampInt(Math.trunc(fromReasons), 1, 10);
+  const s = Number(score0to100) || 0;
+  return clampInt(Math.ceil(s / 10), 1, 10);
+}
+
 export function App() {
   const [tab, setTab] = useState<Tab>("latest");
   const [authStatus, setAuthStatus] = useState<LoadState<{ enabled: boolean; ttl_hours: number }>>({ status: "idle" });
@@ -23,6 +36,8 @@ export function App() {
   const [loginPw, setLoginPw] = useState<string>("");
   const [loginErr, setLoginErr] = useState<string>("");
   const [metrics, setMetrics] = useState<LoadState<AdminMetrics>>({ status: "idle" });
+  const [socialCoverage, setSocialCoverage] = useState<LoadState<SocialCoverage>>({ status: "idle" });
+  const [backtest, setBacktest] = useState<LoadState<LatestBacktestRun>>({ status: "idle" });
   const [whales13f, setWhales13f] = useState<LoadState<Latest13FWhales>>({ status: "idle" });
   const [whalesInsider, setWhalesInsider] = useState<LoadState<LatestInsiderWhales>>({ status: "idle" });
   const [recs, setRecs] = useState<
@@ -253,6 +268,16 @@ export function App() {
     api.listSubscriberAlertRuns(5)
       .then((data) => setSubscriberRuns({ status: "ok", data }))
       .catch((e) => setSubscriberRuns({ status: "error", error: String(e) }));
+
+    setSocialCoverage({ status: "loading" });
+    api.socialCoverage(24, 10)
+      .then((data) => setSocialCoverage({ status: "ok", data }))
+      .catch((e) => setSocialCoverage({ status: "error", error: String(e) }));
+
+    setBacktest({ status: "loading" });
+    api.latestBacktestRun()
+      .then((data) => setBacktest({ status: "ok", data }))
+      .catch((e) => setBacktest({ status: "error", error: String(e) }));
   }, [tab]);
 
   useEffect(() => {
@@ -459,7 +484,9 @@ export function App() {
                             <span className="mono">{p.ticker}</span>
                             <span className="muted">{p.action.toUpperCase()}</span>
                           </div>
-                          <div className="muted">Score {p.score} · Conf {(p.confidence * 100).toFixed(0)}%</div>
+                          <div className="muted">
+                            Score {scoreTo10(p.score, (p as any).reasons)} · Conf {(p.confidence * 100).toFixed(0)}%
+                          </div>
                           <div className="muted">{p.why}</div>
                         </button>
                       ))}
@@ -471,7 +498,7 @@ export function App() {
           </div>
           <div className="card">
             <div className="cardTitle">Top Picks (v0)</div>
-            <div className="muted">Score + Watch/Sell/Buy require corroboration (13F is delayed).</div>
+            <div className="muted">Score is 1–10 (derived). Buy requires corroboration (13F is delayed).</div>
             {recs.status === "loading" && <div className="muted">Loading…</div>}
             {recs.status === "error" && <div className="error">{recs.error}</div>}
             {recs.status === "ok" && recs.data && (
@@ -489,8 +516,7 @@ export function App() {
                     <tr>
                       <th>#</th>
                       <th>Ticker</th>
-                      <th className="num">Score</th>
-                      <th className="num">Conv</th>
+                      <th className="num">Score(1–10)</th>
                       <th>Action</th>
                       <th className="num">Conf</th>
                       <th>Why</th>
@@ -515,8 +541,7 @@ export function App() {
                       >
                         <td className="muted">{idx + 1}</td>
                         <td>{r.ticker}</td>
-                        <td className="num">{r.score}</td>
-                        <td className="num">{Number((r.reasons as any)?.conviction_1_10 ?? Math.ceil((Number(r.score) || 0) / 10))}</td>
+                        <td className="num">{scoreTo10(r.score, r.reasons)}</td>
                         <td>{r.action}</td>
                         <td className="num">{(r.confidence * 100).toFixed(0)}%</td>
                         <td className="muted">
@@ -542,7 +567,7 @@ export function App() {
 
           <div className="card">
             <div className="cardTitle">Fresh Whale Signals (v0)</div>
-            <div className="muted">Primarily SC 13D/13G + Form 4 (fresh) with trend/volume confirmation.</div>
+            <div className="muted">Score is 1–10 (derived). Primarily SC 13D/13G + Form 4 (fresh) with trend/volume confirmation. Technical guardrail is applied when price data is available.</div>
             {fresh.status === "loading" && <div className="muted">Loading…</div>}
             {fresh.status === "error" && <div className="error">{fresh.error}</div>}
             {fresh.status === "ok" && fresh.data && (
@@ -558,8 +583,7 @@ export function App() {
                     <tr>
                       <th>#</th>
                       <th>Ticker</th>
-                      <th className="num">Score</th>
-                      <th className="num">Conv</th>
+                      <th className="num">Score(1–10)</th>
                       <th>Action</th>
                       <th className="num">Conf</th>
                       <th>Why</th>
@@ -584,8 +608,7 @@ export function App() {
                       >
                         <td className="muted">{idx + 1}</td>
                         <td>{r.ticker}</td>
-                        <td className="num">{r.score}</td>
-                        <td className="num">{Number((r.reasons as any)?.conviction_1_10 ?? Math.ceil((Number(r.score) || 0) / 10))}</td>
+                        <td className="num">{scoreTo10(r.score, r.reasons)}</td>
                         <td>{r.action}</td>
                         <td className="num">{(r.confidence * 100).toFixed(0)}%</td>
                         <td className="muted">
@@ -597,8 +620,6 @@ export function App() {
                               ? "bear"
                               : "n/a")}{" "}
                           · Vol {((r.reasons as any)?.volume?.spike ? "spike" : "—")}
-                          {" · "}
-                          Conv {Number((r.reasons as any)?.conviction_1_10 ?? Math.ceil((Number(r.score) || 0) / 10))}
                         </td>
                       </tr>
                     ))}
@@ -708,7 +729,7 @@ export function App() {
                     <tr>
                       <th>#</th>
                       <th>Ticker</th>
-                      <th className="num">Score</th>
+                      <th className="num">Score(1–10)</th>
                       <th>Action</th>
                       <th className="num">Conf</th>
                       <th>Why</th>
@@ -733,7 +754,7 @@ export function App() {
                       >
                         <td className="muted">{idx + 1}</td>
                         <td>{r.ticker}</td>
-                        <td className="num">{r.score}</td>
+                        <td className="num">{scoreTo10(r.score, r.reasons)}</td>
                         <td>{r.action}</td>
                         <td className="num">{(r.confidence * 100).toFixed(0)}%</td>
                         <td className="muted">
@@ -800,7 +821,7 @@ export function App() {
                         <tr>
                           <th>Ticker</th>
                           <th>Action</th>
-                          <th className="num">Score</th>
+                          <th className="num">Score(1–10)</th>
                           <th className="num">Conf</th>
                           <th>Why</th>
                           <th></th>
@@ -811,7 +832,7 @@ export function App() {
                           <tr key={`${it.ticker}-${it.action}`}>
                             <td className="mono">{it.ticker}</td>
                             <td>{it.action}</td>
-                            <td className="num">{it.score}</td>
+                            <td className="num">{scoreTo10(it.score, it.evidence as any)}</td>
                             <td className="num">{Math.round(it.confidence * 100)}%</td>
                             <td className="muted">{(it.why ?? []).slice(0, 2).join(" · ")}</td>
                             <td style={{ textAlign: "right" }}>
@@ -860,7 +881,7 @@ export function App() {
 
           <div className="card span2">
             <div className="cardTitle">Tools: Subscriber Alert Thresholds</div>
-            <div className="muted">Controls which BUY/SELL signals are emailed in the pilot.</div>
+            <div className="muted">Controls which BUY/SELL signals are emailed in the pilot (thresholds use raw 0–100 score for now).</div>
             {policy.status === "loading" && <div className="muted">Loading…</div>}
             {policy.status === "error" && <div className="error">{policy.error}</div>}
             {policy.status === "ok" && policyDraft && (
@@ -1020,6 +1041,110 @@ export function App() {
                   <div className="kvVal">{coveragePct === null ? "n/a" : <Percent value={coveragePct} />}</div>
                 </div>
               </div>
+            )}
+          </div>
+
+          <div className="card">
+            <div className="cardTitle">Social Coverage</div>
+            <div className="muted">Listener visibility (last 24h).</div>
+            {socialCoverage.status === "loading" && <div className="muted">Loading…</div>}
+            {socialCoverage.status === "error" && <div className="error">{socialCoverage.error}</div>}
+            {socialCoverage.status === "ok" && socialCoverage.data && (
+              <>
+                <div className="kv">
+                  <div className="kvRow">
+                    <div className="kvKey">Enabled</div>
+                    <div className="kvVal">{socialCoverage.data.enabled ? "yes" : "no"}</div>
+                  </div>
+                  <div className="kvRow">
+                    <div className="kvKey">Latest bucket</div>
+                    <div className="kvVal">{socialCoverage.data.latest_bucket_start ? socialCoverage.data.latest_bucket_start.replace("T", " ").slice(0, 19) : "n/a"}</div>
+                  </div>
+                  <div className="kvRow">
+                    <div className="kvKey">Rows (24h)</div>
+                    <div className="kvVal">{socialCoverage.data.rows_window}</div>
+                  </div>
+                  <div className="kvRow">
+                    <div className="kvKey">Tickers (24h)</div>
+                    <div className="kvVal">{socialCoverage.data.distinct_tickers_window}</div>
+                  </div>
+                  <div className="kvRow">
+                    <div className="kvKey">Policy</div>
+                    <div className="kvVal">
+                      v≥{socialCoverage.data.policy.velocity_threshold}, min m={socialCoverage.data.policy.min_mentions}
+                    </div>
+                  </div>
+                </div>
+                <table className="table" style={{ marginTop: 8 }}>
+                  <thead>
+                    <tr>
+                      <th>Ticker</th>
+                      <th className="num">Mentions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(socialCoverage.data.top_tickers_window || []).slice(0, 6).map((r) => (
+                      <tr key={r.ticker}>
+                        <td>{r.ticker}</td>
+                        <td className="num">{r.mentions}</td>
+                      </tr>
+                    ))}
+                    {(socialCoverage.data.top_tickers_window || []).length === 0 && (
+                      <tr>
+                        <td colSpan={2} className="muted">
+                          No social rows in window.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </div>
+
+          <div className="card span2">
+            <div className="cardTitle">Backtest (5D/20D)</div>
+            <div className="muted">Latest backtest artifact vs baseline.</div>
+            {backtest.status === "loading" && <div className="muted">Loading…</div>}
+            {backtest.status === "error" && <div className="error">{backtest.error}</div>}
+            {backtest.status === "ok" && backtest.data && (
+              <>
+                {!backtest.data.run ? (
+                  <div className="muted">No backtest run yet.</div>
+                ) : (
+                  <>
+                    <div className="muted">
+                      baseline: {String(backtest.data.run.summary?.baseline_ticker || "SPY")} · runs: {Number(backtest.data.run.summary?.runs_considered || 0)} · completed: {backtest.data.run.completed_at ? String(backtest.data.run.completed_at).replace("T", " ").slice(0, 19) : "n/a"}
+                    </div>
+                    <table className="table" style={{ marginTop: 8 }}>
+                      <thead>
+                        <tr>
+                          <th>Source</th>
+                          <th>Action</th>
+                          <th className="num">H</th>
+                          <th className="num">N</th>
+                          <th className="num">Cov</th>
+                          <th className="num">Hit</th>
+                          <th className="num">Excess</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(backtest.data.run.summary?.metrics || []).slice(0, 12).map((m, i) => (
+                          <tr key={`${m.source_kind}-${m.action}-${m.horizon_days}-${i}`}>
+                            <td>{m.source_kind}</td>
+                            <td>{m.action}</td>
+                            <td className="num">{m.horizon_days}D</td>
+                            <td className="num">{m.evaluated}/{m.attempted}</td>
+                            <td className="num">{(Number(m.coverage || 0) * 100).toFixed(0)}%</td>
+                            <td className="num">{m.hit_rate_vs_baseline == null ? "n/a" : `${(Number(m.hit_rate_vs_baseline) * 100).toFixed(0)}%`}</td>
+                            <td className="num">{m.avg_excess_return == null ? "n/a" : `${(Number(m.avg_excess_return) * 100).toFixed(2)}%`}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
+              </>
             )}
           </div>
 
@@ -1294,7 +1419,11 @@ export function App() {
       )}
 
       <Drawer
-        title={selectedRec ? `${selectedRec.ticker} — ${selectedRec.action.toUpperCase()} (${selectedRec.score})` : ""}
+        title={
+          selectedRec
+            ? `${selectedRec.ticker} — ${selectedRec.action.toUpperCase()} (score ${scoreTo10(selectedRec.score, selectedRec.reasons)}/10, conf ${Math.round(selectedRec.confidence * 100)}%)`
+            : ""
+        }
         open={selectedRec !== null}
         onClose={() => setSelectedRec(null)}
       >
@@ -1329,6 +1458,36 @@ export function App() {
                   <div className="kvKey">Insider latest</div>
                   <div className="kvVal">{String((selectedRec.reasons as any)?.insider?.latest_event_date ?? "n/a")}</div>
                 </div>
+                {((selectedRec.reasons as any)?.insider?.buy_count_10b5 != null ||
+                  (selectedRec.reasons as any)?.insider?.sell_count_10b5 != null ||
+                  (selectedRec.reasons as any)?.insider?.cluster_buy_insiders != null) ? (
+                  <>
+                    <div style={{ marginTop: 8 }} className="muted">
+                      Insider quality (v0.1)
+                    </div>
+                    <div className="kvRow">
+                      <div className="kvKey">10b5-1 buy</div>
+                      <div className="kvVal">
+                        <Money value={Number((selectedRec.reasons as any)?.insider?.buy_value_10b5 ?? 0)} /> ·
+                        {Number((selectedRec.reasons as any)?.insider?.buy_count_10b5 ?? 0)} tx
+                      </div>
+                    </div>
+                    <div className="kvRow">
+                      <div className="kvKey">10b5-1 sell</div>
+                      <div className="kvVal">
+                        <Money value={Number((selectedRec.reasons as any)?.insider?.sell_value_10b5 ?? 0)} /> ·
+                        {Number((selectedRec.reasons as any)?.insider?.sell_count_10b5 ?? 0)} tx
+                      </div>
+                    </div>
+                    <div className="kvRow">
+                      <div className="kvKey">Cluster buy</div>
+                      <div className="kvVal">
+                        {Number((selectedRec.reasons as any)?.insider?.cluster_buy_insiders ?? 0) >= 3 ? "yes" : "no"} ·
+                        {Number((selectedRec.reasons as any)?.insider?.cluster_buy_insiders ?? 0)} insiders
+                      </div>
+                    </div>
+                  </>
+                ) : null}
               </>
             ) : null}
             <div className="kvRow">
@@ -1343,6 +1502,81 @@ export function App() {
               <div className="kvKey">Confidence</div>
               <div className="kvVal">{(selectedRec.confidence * 100).toFixed(0)}%</div>
             </div>
+            {(selectedRec.reasons as any)?.divergence ? (
+              <>
+                <div style={{ marginTop: 10 }} className="muted">
+                  Divergence
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Type</div>
+                  <div className="kvVal">{String((selectedRec.reasons as any)?.divergence?.label ?? "none")}</div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Insider vs trend</div>
+                  <div className="kvVal">
+                    {String((selectedRec.reasons as any)?.divergence?.insider_direction ?? "neutral")} /{" "}
+                    {String((selectedRec.reasons as any)?.divergence?.trend_direction ?? "neutral")}
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Score adj</div>
+                  <div className="kvVal">
+                    {Number((selectedRec.reasons as any)?.divergence?.score_adjustment ?? 0) >= 0 ? "+" : ""}
+                    {Number((selectedRec.reasons as any)?.divergence?.score_adjustment ?? 0)}
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Conf adj</div>
+                  <div className="kvVal">
+                    {Number((selectedRec.reasons as any)?.divergence?.confidence_adjustment ?? 0) >= 0 ? "+" : ""}
+                    {((Number((selectedRec.reasons as any)?.divergence?.confidence_adjustment ?? 0)) * 100).toFixed(0)}%
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Note</div>
+                  <div className="kvVal">{String((selectedRec.reasons as any)?.divergence?.note ?? "n/a")}</div>
+                </div>
+              </>
+            ) : null}
+            {(selectedRec.reasons as any)?.social?.enabled ? (
+              <>
+                <div style={{ marginTop: 10 }} className="muted">
+                  Social listener (cashtag velocity)
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Source</div>
+                  <div className="kvVal">{String((selectedRec.reasons as any)?.social?.source ?? "n/a")}</div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Latest bucket</div>
+                  <div className="kvVal">{String((selectedRec.reasons as any)?.social?.latest_bucket_start ?? "n/a")}</div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Mentions (latest)</div>
+                  <div className="kvVal">{Number((selectedRec.reasons as any)?.social?.mentions_latest ?? 0)}</div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Mentions (7D avg)</div>
+                  <div className="kvVal">
+                    {(selectedRec.reasons as any)?.social?.mentions_baseline_7d == null
+                      ? "n/a"
+                      : Number((selectedRec.reasons as any)?.social?.mentions_baseline_7d ?? 0).toFixed(2)}
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Velocity</div>
+                  <div className="kvVal">
+                    {(selectedRec.reasons as any)?.social?.velocity == null
+                      ? "n/a"
+                      : `${Number((selectedRec.reasons as any)?.social?.velocity ?? 0).toFixed(2)}x`}
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Persistent (2 buckets)</div>
+                  <div className="kvVal">{(selectedRec.reasons as any)?.social?.persistent ? "yes" : "no"}</div>
+                </div>
+              </>
+            ) : null}
 
             {((selectedRec.reasons as any)?.delta_value_usd != null ||
               (selectedRec.reasons as any)?.context_13f != null) ? (
@@ -1519,6 +1753,60 @@ export function App() {
                 ) : null}
               </>
             ) : null}
+
+            <div style={{ marginTop: 10 }} className="muted">
+              Technical guardrail (entry quality)
+            </div>
+            {(selectedRec.reasons as any)?.tech_guardrail ? (
+              <>
+                <div className="kvRow">
+                  <div className="kvKey">Signal</div>
+                  <div className="kvVal">
+                    {Array.isArray((selectedRec.reasons as any)?.tech_guardrail?.notes)
+                      ? ((selectedRec.reasons as any)?.tech_guardrail?.notes ?? []).join(" · ")
+                      : String((selectedRec.reasons as any)?.tech_guardrail?.notes ?? "—")}
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Factor (Ft)</div>
+                  <div className="kvVal">{Number((selectedRec.reasons as any)?.tech_guardrail?.ft ?? 1).toFixed(2)}</div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Adj</div>
+                  <div className="kvVal">{Number((selectedRec.reasons as any)?.tech_guardrail?.adj ?? 0) >= 0 ? "+" : ""}{Number((selectedRec.reasons as any)?.tech_guardrail?.adj ?? 0)}</div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Score (raw)</div>
+                  <div className="kvVal">
+                    {Number((selectedRec.reasons as any)?.tech_guardrail?.score_before ?? selectedRec.score)} →{" "}
+                    {Number((selectedRec.reasons as any)?.tech_guardrail?.score_after ?? selectedRec.score)}
+                  </div>
+                </div>
+                {(selectedRec.reasons as any)?.trend?.dist_sma50_pct != null ? (
+                  <div className="kvRow">
+                    <div className="kvKey">Dist to SMA50</div>
+                    <div className="kvVal">{(((selectedRec.reasons as any)?.trend?.dist_sma50_pct ?? 0) * 100).toFixed(1)}%</div>
+                  </div>
+                ) : null}
+                {(selectedRec.reasons as any)?.trend?.dist_sma200_pct != null ? (
+                  <div className="kvRow">
+                    <div className="kvKey">Dist to SMA200</div>
+                    <div className="kvVal">{(((selectedRec.reasons as any)?.trend?.dist_sma200_pct ?? 0) * 100).toFixed(1)}%</div>
+                  </div>
+                ) : null}
+                {(selectedRec.reasons as any)?.trend?.dist_high_60d_pct != null ? (
+                  <div className="kvRow">
+                    <div className="kvKey">Dist to 60D high</div>
+                    <div className="kvVal">{(((selectedRec.reasons as any)?.trend?.dist_high_60d_pct ?? 0) * 100).toFixed(1)}%</div>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="kvRow">
+                <div className="kvKey">Status</div>
+                <div className="kvVal">no technical data (insufficient recent price bars)</div>
+              </div>
+            )}
 
             {(selectedRec.reasons as any)?.volume ? (
               <>
@@ -1734,7 +2022,7 @@ export function App() {
                       <tr>
                         <th>Ticker</th>
                         <th>Action</th>
-                        <th className="num">Score</th>
+                        <th className="num">Score(1–10)</th>
                         <th className="num">Conf</th>
                         <th>Why</th>
                       </tr>
@@ -1744,7 +2032,7 @@ export function App() {
                         <tr key={`${it.ticker}-${it.action}`}>
                           <td className="mono">{it.ticker}</td>
                           <td>{it.action}</td>
-                          <td className="num">{it.score}</td>
+                          <td className="num">{scoreTo10(it.score, it.evidence as any)}</td>
                           <td className="num">{Math.round(it.confidence * 100)}%</td>
                           <td className="muted">{(it.why ?? []).slice(0, 2).join(" · ")}</td>
                         </tr>

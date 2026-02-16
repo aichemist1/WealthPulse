@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,25 +19,30 @@ from app.ingestion.form4_edgar import ingest_form4_day
 from app.ingestion.prices_stooq import ingest_stooq_prices
 from app.ingestion.sc13_edgar import ingest_sc13_day
 from app.ingestion.thirteenf_edgar import ingest_13f_day
-from app.models import Event, Filing, InsiderTx, Investor, RawPayload, Stock
+from app.models import Event, Filing, InsiderTx, InsiderTxMeta, Investor, RawPayload, Stock
 from app.models import Institution13FHolding, Institution13FReport, Snapshot13FWhale
 from app.models import LargeOwnerFiling
 from app.models import PriceBar
+from app.models import SocialSignal
 from app.models import Security
 from app.models import DividendMetrics
 from app.models import SnapshotInsiderWhale, SnapshotRun
 from app.models import SnapshotRecommendation
 from app.models import Subscriber
 from app.models import AlertDelivery, AlertRun
+from app.models import DailySnapshotArtifact
+from app.models import BacktestRun
 from app.snapshot.insider_whales import compute_insider_whales, window_start
 from app.security_map import parse_security_map_csv
 from app.snapshot.thirteenf_whales import HoldingValueRow, compute_13f_whales, previous_quarter_end
 from app.snapshot.recommendations_v0 import WhaleDeltaRow, score_recommendations_from_13f
 from app.snapshot.fresh_signals_v0 import FreshSignalParams, compute_fresh_signals_v0
-from app.snapshot.trend import compute_trend_from_closes
+from app.snapshot.trend import compute_technical_snapshot_from_closes, compute_trend_from_closes
+from app.snapshot.tech_guardrail_v0 import apply_tech_guardrail_v0
 from app.snapshot.market_regime import compute_market_regime
 from app.snapshot.watchlists import parse_ticker_csv
 from app.connectors.yahoo_finance import YahooFinanceClient, YahooFinanceError
+from app.connectors.social_reddit import RedditSocialClient, RedditSocialError, parse_reddit_listing_to_buckets
 from app.snapshot.alerts_v0 import generate_alerts_v0
 from app.subscriptions import issue_token, upsert_subscriber, confirm_subscription, unsubscribe
 from app.notifications.email_smtp import send_email_smtp, EmailSendError
@@ -46,6 +52,9 @@ from app.alerts.send_subscriber_alerts_v0 import (
 )
 from app.admin_settings import get_setting, set_setting
 from app.snapshot.sector_regime import compute_sector_regimes
+from app.settings import settings
+from app.snapshot.daily_artifact_v0 import build_daily_snapshot_payload_v0
+from app.backtest.harness_v0 import run_backtest_v0
 
 
 app = typer.Typer(add_completion=False)
@@ -184,6 +193,8 @@ def ingest_form4_xml(path: Path, accession: str = typer.Option("", help="Optiona
                 seq=i,
             )
             session.add(insider_tx)
+            session.flush()
+            session.add(InsiderTxMeta(insider_tx_id=insider_tx.id, is_10b5_1=tx.is_10b5_1))
             inserted += 1
 
         session.commit()
@@ -315,6 +326,193 @@ def ingest_prices_stooq(
     with Session(engine) as session:
         res = ingest_stooq_prices(session=session, tickers=ts, keep_last_days=keep_last_days)
     typer.echo(f"Stooq prices: tickers_seen={res.tickers_seen} bars_inserted={res.bars_inserted}")
+
+
+@app.command("ingest-social-signals-csv")
+def ingest_social_signals_csv(
+    csv_file: Path = typer.Option(..., help="CSV with at least: ticker,bucket_start,mentions"),
+    source: str = typer.Option("manual_csv", help="Source label"),
+    bucket_minutes: int = typer.Option(15, help="Bucket duration in minutes"),
+) -> None:
+    """
+    Ingest social/cashtag buckets from CSV (feature-flagged listener input).
+
+    CSV columns:
+    - required: ticker, bucket_start (ISO datetime), mentions (int)
+    - optional: sentiment_hint (float -1..1), source, bucket_minutes
+    """
+    if not csv_file.exists():
+        raise typer.BadParameter(f"csv_file not found: {csv_file}")
+
+    inserted = 0
+    updated = 0
+    rows_seen = 0
+
+    with Session(engine) as session:
+        with csv_file.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows_seen += 1
+                ticker = str(row.get("ticker") or "").strip().upper()
+                if not ticker:
+                    continue
+                bucket_start_s = str(row.get("bucket_start") or "").strip()
+                if not bucket_start_s:
+                    continue
+                try:
+                    bucket_start = datetime.fromisoformat(bucket_start_s)
+                except Exception:
+                    continue
+                try:
+                    mentions = int(float(str(row.get("mentions") or "0").strip() or "0"))
+                except Exception:
+                    mentions = 0
+
+                sentiment_hint = None
+                if row.get("sentiment_hint") not in (None, ""):
+                    try:
+                        sentiment_hint = float(str(row.get("sentiment_hint")).strip())
+                    except Exception:
+                        sentiment_hint = None
+
+                row_source = str(row.get("source") or source).strip() or source
+                row_bucket_minutes = bucket_minutes
+                if row.get("bucket_minutes") not in (None, ""):
+                    try:
+                        row_bucket_minutes = int(float(str(row.get("bucket_minutes")).strip()))
+                    except Exception:
+                        row_bucket_minutes = bucket_minutes
+
+                existing = session.exec(
+                    select(SocialSignal).where(
+                        col(SocialSignal.ticker) == ticker,
+                        col(SocialSignal.bucket_start) == bucket_start,
+                        col(SocialSignal.bucket_minutes) == row_bucket_minutes,
+                        col(SocialSignal.source) == row_source,
+                    )
+                ).first()
+
+                if existing is None:
+                    session.add(
+                        SocialSignal(
+                            ticker=ticker,
+                            bucket_start=bucket_start,
+                            bucket_minutes=row_bucket_minutes,
+                            mentions=max(0, mentions),
+                            sentiment_hint=sentiment_hint,
+                            source=row_source,
+                        )
+                    )
+                    inserted += 1
+                else:
+                    existing.mentions = max(0, mentions)
+                    existing.sentiment_hint = sentiment_hint
+                    updated += 1
+        session.commit()
+
+    typer.echo(f"Social CSV: rows_seen={rows_seen} inserted={inserted} updated={updated}")
+
+
+@app.command("ingest-social-reddit")
+def ingest_social_reddit(
+    subreddits: str = typer.Option("", help="Comma-separated subreddits (default from settings)"),
+    listing: str = typer.Option("", help="new|hot (default from settings)"),
+    limit_per_subreddit: int = typer.Option(0, help="Posts per subreddit (max 100; default from settings)"),
+    lookback_hours: int = typer.Option(24, help="Only include posts created in this window"),
+    bucket_minutes: int = typer.Option(0, help="Bucket minutes (default from settings)"),
+    allow_plain_upper: bool = typer.Option(False, help="Also parse plain uppercase tokens (higher false positives)"),
+    source: str = typer.Option("", help="Source label override"),
+    dry_run: bool = typer.Option(False, help="Parse and print counts; do not write DB"),
+) -> None:
+    """
+    Ingest social mention buckets from Reddit listings.
+
+    v0.1 uses strict cashtag extraction by default ($AAPL).
+    """
+
+    subs_raw = subreddits.strip() or settings.social_reddit_subreddits
+    subs = [s.strip().lower() for s in subs_raw.split(",") if s.strip()]
+    if not subs:
+        raise typer.BadParameter("No subreddits provided")
+
+    list_name = (listing.strip() or settings.social_reddit_listing or "new").lower()
+    if list_name not in {"new", "hot"}:
+        raise typer.BadParameter("listing must be new|hot")
+    lim = limit_per_subreddit if limit_per_subreddit > 0 else int(settings.social_reddit_limit_per_subreddit)
+    lim = max(1, min(int(lim), 100))
+    bmin = bucket_minutes if bucket_minutes > 0 else int(settings.social_reddit_bucket_minutes)
+    bmin = max(1, min(int(bmin), 120))
+    src = source.strip() or settings.social_reddit_source_label or "reddit"
+    plain_upper = bool(allow_plain_upper or settings.social_reddit_allow_plain_upper)
+    since = datetime.utcnow() - timedelta(hours=max(1, min(int(lookback_hours), 168)))
+
+    client = RedditSocialClient(user_agent=settings.sec_user_agent, timeout_s=20.0, rps=1.0)
+
+    rows_seen = 0
+    inserted = 0
+    updated = 0
+    sub_ok = 0
+    sub_failed = 0
+    by_ticker: dict[str, int] = {}
+
+    with Session(engine) as session:
+        for sub in subs:
+            try:
+                payload = client.fetch_listing(subreddit=sub, listing=list_name, limit=lim)
+                rows = parse_reddit_listing_to_buckets(
+                    payload=payload,
+                    source=f"{src}:{sub}",
+                    bucket_minutes=bmin,
+                    since=since,
+                    allow_plain_upper=plain_upper,
+                )
+                sub_ok += 1
+            except RedditSocialError as e:
+                sub_failed += 1
+                typer.echo(f"WARN: {e}")
+                continue
+
+            for row in rows:
+                rows_seen += 1
+                by_ticker[row.ticker] = by_ticker.get(row.ticker, 0) + int(row.mentions or 0)
+                if dry_run:
+                    continue
+
+                existing = session.exec(
+                    select(SocialSignal).where(
+                        col(SocialSignal.ticker) == row.ticker,
+                        col(SocialSignal.bucket_start) == row.bucket_start,
+                        col(SocialSignal.bucket_minutes) == row.bucket_minutes,
+                        col(SocialSignal.source) == row.source,
+                    )
+                ).first()
+                if existing is None:
+                    session.add(
+                        SocialSignal(
+                            ticker=row.ticker,
+                            bucket_start=row.bucket_start,
+                            bucket_minutes=row.bucket_minutes,
+                            mentions=max(0, int(row.mentions)),
+                            sentiment_hint=row.sentiment_hint,
+                            source=row.source,
+                        )
+                    )
+                    inserted += 1
+                else:
+                    existing.mentions = max(0, int(row.mentions))
+                    existing.sentiment_hint = row.sentiment_hint
+                    updated += 1
+
+        if not dry_run:
+            session.commit()
+
+    top = sorted(by_ticker.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    top_txt = ", ".join([f"{t}:{m}" for (t, m) in top]) if top else "none"
+    typer.echo(
+        f"Social Reddit: subreddits_ok={sub_ok} failed={sub_failed} "
+        f"rows_seen={rows_seen} inserted={inserted} updated={updated} dry_run={dry_run}"
+    )
+    typer.echo(f"Top mentions: {top_txt}")
 
 
 @app.command("ingest-dividend-metrics-yahoo")
@@ -487,7 +685,8 @@ def enrich_security_map_openfigi(
             cusips = [str(c).upper() for c in session.exec(select(Institution13FHolding.cusip).distinct()).all()]
 
         # Only query those not yet mapped.
-        known = {s.cusip for s in session.exec(select(Security.cusip)).all()}
+        # SQLModel returns scalars for single-column selects.
+        known = {str(c).upper() for c in session.exec(select(Security.cusip)).all() if c}
         todo = [c for c in cusips if c and c not in known][:limit]
 
         inserted = 0
@@ -838,27 +1037,33 @@ def snapshot_recommendations_v0(
 
         recs = score_recommendations_from_13f(rows=inputs, mapped_coverage_ratio=coverage, top_n=top_n)
         # Corroborators (fresh window)
+        # NOTE: SQLModel returns scalars (not 1-tuples) for single-column selects.
         insider_buy_tickers = {
-            t
-            for (t,) in session.exec(
+            str(t).upper()
+            for t in session.exec(
                 select(InsiderTx.ticker)
+                .join(InsiderTxMeta, col(InsiderTxMeta.insider_tx_id) == col(InsiderTx.id), isouter=True)
                 .where(col(InsiderTx.transaction_code) == "P")
                 .where(col(InsiderTx.is_derivative) == False)  # noqa: E712
                 .where(InsiderTx.event_date != None)  # noqa: E711
                 .where(InsiderTx.event_date >= fresh_start)
                 .where(InsiderTx.transaction_value != None)  # noqa: E711
                 .where(InsiderTx.transaction_value >= insider_min_value)
+                # 10b5-1 planned buys do not act as strong "fresh corroborator".
+                .where((InsiderTxMeta.is_10b5_1 == None) | (col(InsiderTxMeta.is_10b5_1) == False))  # noqa: E711,E712
                 .distinct()
             ).all()
+            if t
         }
         sc13_tickers = {
-            t
-            for (t,) in session.exec(
+            str(t).upper()
+            for t in session.exec(
                 select(LargeOwnerFiling.ticker)
                 .where(LargeOwnerFiling.filed_at != None)  # noqa: E711
                 .where(LargeOwnerFiling.filed_at >= fresh_start)
                 .distinct()
             ).all()
+            if t
         }
 
         # Trend corroborator (requires recent price bars).
@@ -884,31 +1089,16 @@ def snapshot_recommendations_v0(
                 continue
             dates = [d for (d, _) in bars]
             closes = [float(c) for (_, c) in bars]
-            tm = compute_trend_from_closes(dates=dates, closes=closes)
-            ret60 = None
-            if len(closes) >= 61:
-                prev = closes[-61]
-                if prev:
-                    ret60 = (closes[-1] / prev) - 1.0
-            sma200 = None
-            if len(closes) >= 200:
-                sma200 = sum(closes[-200:]) / 200.0
-            trend_by_ticker[rec.ticker] = {
-                "as_of_date": tm.as_of_date,
-                "close": tm.close,
-                "sma50": tm.sma50,
-                "sma200": sma200,
-                "return_20d": tm.return_20d,
-                "return_60d": ret60,
-                "bullish": tm.bullish,
-            }
+            tech = compute_technical_snapshot_from_closes(dates=dates, closes=closes)
+            # Keep `trend` as a dict for UI and add technical guardrail fields.
+            trend_by_ticker[rec.ticker] = tech
             # "fresh" = last price within 3 days of as_of (calendar)
-            if tm.as_of_date:
+            if tech.get("as_of_date"):
                 try:
-                    y, m, d = (int(x) for x in tm.as_of_date.split("-"))
+                    y, m, d = (int(x) for x in str(tech.get("as_of_date")).split("-"))
                     last_day = datetime(y, m, d).date()
                     delta_days = (as_of_dt.date() - last_day).days
-                    if 0 <= delta_days <= 3 and tm.bullish:
+                    if 0 <= delta_days <= 3 and bool(tech.get("bullish")):
                         trend_bullish_tickers.add(rec.ticker)
                 except Exception:
                     pass
@@ -982,6 +1172,17 @@ def snapshot_recommendations_v0(
 
             rec.score = max(0, min(100, whale_score + trend_adj + market_score_adj + sector_score_adj))
             rec.confidence = max(0.05, min(0.90, rec.confidence + market_conf_adj + sector_conf_adj))
+
+            # Technical guardrail: penalize chasing (extended/near-high), boost near support.
+            tg = apply_tech_guardrail_v0(score=rec.score, tech=trend_by_ticker.get(rec.ticker))
+            rec.reasons["tech_guardrail"] = {
+                "ft": tg.ft,
+                "adj": tg.adj,
+                "score_before": tg.score_before,
+                "score_after": tg.score_after,
+                "notes": tg.notes,
+            }
+            rec.score = tg.score_after
 
             # Derived display value: 1..10 conviction band (do not treat as guaranteed performance).
             rec.reasons["conviction_1_10"] = int((rec.score + 9) // 10)
@@ -1142,6 +1343,163 @@ def snapshot_fresh_signals_v0(
 
     for r in rows:
         typer.echo(f"{r.ticker} score={r.score} action={r.action} dir={r.direction} conf={r.confidence:.2f}")
+
+
+@app.command("snapshot-daily-artifact-v0")
+def snapshot_daily_artifact_v0(
+    as_of: str = typer.Option("", help="As-of timestamp (ISO), default now"),
+    version: str = typer.Option("v0.1", help="Artifact schema/version tag"),
+    top_n_rows: int = typer.Option(25, help="Top rows saved per snapshot source"),
+    picks_per_segment: int = typer.Option(3, help="Segment picks per bucket saved in artifact"),
+    force: bool = typer.Option(False, help="Write new artifact even if same hash already exists for as_of/version"),
+) -> None:
+    """
+    Build and persist a versioned/auditable daily snapshot artifact.
+    """
+
+    run_as_of = datetime.utcnow()
+    if as_of.strip():
+        try:
+            run_as_of = datetime.fromisoformat(as_of.strip())
+        except Exception:
+            raise typer.BadParameter("as_of must be ISO datetime (e.g. 2026-02-15T09:00:00)")
+
+    version_tag = version.strip() or "v0.1"
+
+    with Session(engine) as session:
+        payload, digest, source_runs = build_daily_snapshot_payload_v0(
+            session=session,
+            as_of=run_as_of,
+            version=version_tag,
+            top_n_rows=top_n_rows,
+            picks_per_segment=picks_per_segment,
+        )
+
+        existing = session.exec(
+            select(DailySnapshotArtifact)
+            .where(col(DailySnapshotArtifact.kind) == "daily_snapshot_v0")
+            .where(col(DailySnapshotArtifact.as_of) == run_as_of)
+            .where(col(DailySnapshotArtifact.version) == version_tag)
+            .where(col(DailySnapshotArtifact.artifact_hash) == digest)
+        ).first()
+
+        if existing is not None and not force:
+            typer.echo(
+                f"Daily artifact unchanged. id={existing.id} as_of={existing.as_of.isoformat()} "
+                f"version={existing.version} hash={existing.artifact_hash[:12]}"
+            )
+            return
+
+        art = DailySnapshotArtifact(
+            kind="daily_snapshot_v0",
+            as_of=run_as_of,
+            version=version_tag,
+            artifact_hash=digest,
+            source_runs=source_runs,
+            payload=payload,
+        )
+        session.add(art)
+        session.commit()
+        session.refresh(art)
+
+    typer.echo(
+        f"Daily artifact created: id={art.id} as_of={art.as_of.isoformat()} "
+        f"version={art.version} hash={art.artifact_hash[:12]}"
+    )
+
+
+@app.command("backtest-snapshots-v0")
+def backtest_snapshots_v0(
+    start_as_of: str = typer.Option(..., help="Start as-of date (YYYY-MM-DD)"),
+    end_as_of: str = typer.Option(..., help="End as-of date (YYYY-MM-DD)"),
+    source_kinds: str = typer.Option(
+        "recommendations_v0,fresh_signals_v0",
+        help="Comma-separated snapshot kinds",
+    ),
+    baseline_ticker: str = typer.Option("SPY", help="Baseline ticker for excess-return comparison"),
+    horizons: str = typer.Option("5,20", help="Forward horizons in trading days"),
+    top_n_per_action: int = typer.Option(5, help="Top rows per action (buy/avoid) per run"),
+    persist: bool = typer.Option(True, help="Persist backtest artifact in DB"),
+) -> None:
+    """
+    Basic backtest harness for snapshot recommendations vs baseline (SPY by default).
+    """
+
+    try:
+        y1, m1, d1 = (int(x) for x in start_as_of.split("-"))
+        y2, m2, d2 = (int(x) for x in end_as_of.split("-"))
+        dt_start = datetime(y1, m1, d1, 0, 0, 0)
+        dt_end = datetime(y2, m2, d2, 23, 59, 59)
+    except Exception:
+        raise typer.BadParameter("start_as_of/end_as_of must be YYYY-MM-DD")
+
+    hs: list[int] = []
+    for x in horizons.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            v = int(x)
+        except Exception:
+            continue
+        if v > 0:
+            hs.append(v)
+    if not hs:
+        hs = [5, 20]
+
+    kinds = [k.strip() for k in source_kinds.split(",") if k.strip()]
+    if not kinds:
+        kinds = ["recommendations_v0", "fresh_signals_v0"]
+
+    with Session(engine) as session:
+        summary = run_backtest_v0(
+            session=session,
+            start_as_of=dt_start,
+            end_as_of=dt_end,
+            source_kinds=kinds,
+            baseline_ticker=baseline_ticker.strip().upper(),
+            horizons=hs,
+            top_n_per_action=top_n_per_action,
+        )
+
+        run_id = None
+        if persist:
+            br = BacktestRun(
+                kind="backtest_v0",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+                params={
+                    "start_as_of": dt_start.isoformat(),
+                    "end_as_of": dt_end.isoformat(),
+                    "source_kinds": kinds,
+                    "baseline_ticker": baseline_ticker.strip().upper(),
+                    "horizons": hs,
+                    "top_n_per_action": top_n_per_action,
+                },
+                summary=summary,
+            )
+            session.add(br)
+            session.commit()
+            session.refresh(br)
+            run_id = br.id
+
+    typer.echo(
+        f"Backtest v0: runs={summary.get('runs_considered')} baseline={summary.get('baseline_ticker')} "
+        f"window={summary.get('window', {}).get('start_as_of')}..{summary.get('window', {}).get('end_as_of')}"
+    )
+    if run_id:
+        typer.echo(f"Backtest artifact id={run_id}")
+
+    for m in summary.get("metrics", []):
+        hr = m.get("hit_rate_vs_baseline")
+        ex = m.get("avg_excess_return")
+        cov = m.get("coverage")
+        typer.echo(
+            f"{m.get('source_kind')} {m.get('action')} h={m.get('horizon_days')} "
+            f"n={m.get('evaluated')}/{m.get('attempted')} cov={cov:.2f} "
+            f"hit={(f'{hr:.2f}' if isinstance(hr, float) else 'n/a')} "
+            f"excess={(f'{100*ex:.2f}%' if isinstance(ex, float) else 'n/a')}"
+        )
 
 
 @app.command("subscribe-email")

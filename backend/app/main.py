@@ -27,6 +27,9 @@ from app.models import (
     AlertDelivery,
     Subscriber,
     SubscriberToken,
+    SocialSignal,
+    DailySnapshotArtifact,
+    BacktestRun,
 )
 from app.settings import settings
 from app.snapshot.watchlists import compute_watchlist, parse_ticker_csv
@@ -398,6 +401,49 @@ def admin_metrics(session: Session = Depends(get_session)) -> dict:
     }
 
 
+@app.get("/admin/social/coverage")
+def admin_social_coverage(hours: int = 24, top_n: int = 10, session: Session = Depends(get_session)) -> dict:
+    """
+    Lightweight social listener coverage for Runs tab.
+    """
+
+    window_hours = max(1, min(int(hours or 24), 168))
+    top_limit = max(1, min(int(top_n or 10), 50))
+    window_start = datetime.utcnow() - timedelta(hours=window_hours)
+
+    recent = list(
+        session.exec(
+            select(SocialSignal)
+            .where(col(SocialSignal.bucket_start) >= window_start)
+            .order_by(col(SocialSignal.bucket_start).desc())
+            .limit(5000)
+        ).all()
+    )
+    latest_bucket = recent[0].bucket_start if recent else None
+
+    mentions_by_ticker: dict[str, int] = {}
+    for r in recent:
+        t = (r.ticker or "").strip().upper()
+        if not t:
+            continue
+        mentions_by_ticker[t] = mentions_by_ticker.get(t, 0) + int(r.mentions or 0)
+
+    top = sorted(mentions_by_ticker.items(), key=lambda kv: kv[1], reverse=True)[:top_limit]
+
+    return {
+        "enabled": bool(settings.social_enabled),
+        "policy": {
+            "velocity_threshold": settings.social_velocity_threshold,
+            "min_mentions": settings.social_min_mentions,
+        },
+        "window_hours": window_hours,
+        "latest_bucket_start": latest_bucket.isoformat() if latest_bucket else None,
+        "rows_window": len(recent),
+        "distinct_tickers_window": len(mentions_by_ticker),
+        "top_tickers_window": [{"ticker": t, "mentions": m} for (t, m) in top],
+    }
+
+
 @app.get("/admin/watchlists/etfs")
 def watchlist_etfs(session: Session = Depends(get_session)) -> dict:
     tickers = parse_ticker_csv(settings.watchlist_etfs)
@@ -461,6 +507,52 @@ def ack_alert(alert_id: str, session: Session = Depends(get_session)) -> dict:
 @app.get("/admin/segments/latest")
 def latest_segments(session: Session = Depends(get_session)) -> dict:
     return compute_segments_v0(session=session, picks_per_segment=2)
+
+
+@app.get("/admin/artifacts/daily/latest")
+def latest_daily_artifact(session: Session = Depends(get_session)) -> dict:
+    art = session.exec(
+        select(DailySnapshotArtifact)
+        .where(col(DailySnapshotArtifact.kind) == "daily_snapshot_v0")
+        .order_by(col(DailySnapshotArtifact.as_of).desc(), col(DailySnapshotArtifact.created_at).desc())
+    ).first()
+    if art is None:
+        return {"ok": True, "artifact": None}
+    return {
+        "ok": True,
+        "artifact": {
+            "id": art.id,
+            "kind": art.kind,
+            "as_of": art.as_of,
+            "version": art.version,
+            "artifact_hash": art.artifact_hash,
+            "source_runs": art.source_runs,
+            "created_at": art.created_at,
+            "payload": art.payload,
+        },
+    }
+
+
+@app.get("/admin/backtests/latest")
+def latest_backtest_run(session: Session = Depends(get_session)) -> dict:
+    r = session.exec(
+        select(BacktestRun)
+        .where(col(BacktestRun.kind) == "backtest_v0")
+        .order_by(col(BacktestRun.completed_at).desc(), col(BacktestRun.started_at).desc())
+    ).first()
+    if r is None:
+        return {"ok": True, "run": None}
+    return {
+        "ok": True,
+        "run": {
+            "id": r.id,
+            "kind": r.kind,
+            "started_at": r.started_at,
+            "completed_at": r.completed_at,
+            "params": r.params,
+            "summary": r.summary,
+        },
+    }
 
 
 @app.post("/subscribe")

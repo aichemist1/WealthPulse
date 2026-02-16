@@ -141,6 +141,46 @@ export type AdminSettingKV = {
   value: Record<string, unknown>;
 };
 
+export type SocialCoverage = {
+  enabled: boolean;
+  policy: { velocity_threshold: number; min_mentions: number };
+  window_hours: number;
+  latest_bucket_start: string | null;
+  rows_window: number;
+  distinct_tickers_window: number;
+  top_tickers_window: Array<{ ticker: string; mentions: number }>;
+};
+
+export type LatestBacktestRun = {
+  ok: boolean;
+  run: null | {
+    id: string;
+    kind: string;
+    started_at: string;
+    completed_at: string | null;
+    params: Record<string, unknown>;
+    summary: {
+      window?: { start_as_of?: string; end_as_of?: string };
+      baseline_ticker?: string;
+      runs_considered?: number;
+      horizons?: number[];
+      source_kinds?: string[];
+      metrics?: Array<{
+        source_kind: string;
+        action: string;
+        horizon_days: number;
+        attempted: number;
+        evaluated: number;
+        coverage: number;
+        avg_ticker_return: number | null;
+        avg_baseline_return: number | null;
+        avg_excess_return: number | null;
+        hit_rate_vs_baseline: number | null;
+      }>;
+    };
+  };
+};
+
 export const api = {
   authStatus: () => apiGet<{ enabled: boolean; ttl_hours: number }>("/admin/auth/status"),
   adminLogin: (password: string) =>
@@ -155,6 +195,9 @@ export const api = {
   inviteSubscriber: (email: string) =>
     apiPost<{ ok: boolean; status?: string; error?: string }>("/subscribe", { email }),
   adminMetrics: () => apiGet<AdminMetrics>("/admin/metrics"),
+  socialCoverage: (hours: number = 24, topN: number = 10) =>
+    apiGet<SocialCoverage>(`/admin/social/coverage?hours=${encodeURIComponent(String(hours))}&top_n=${encodeURIComponent(String(topN))}`),
+  latestBacktestRun: () => apiGet<LatestBacktestRun>("/admin/backtests/latest"),
   latest13FWhales: () => apiGet<Latest13FWhales>("/admin/snapshots/13f-whales/latest"),
   latestInsiderWhales: () => apiGet<LatestInsiderWhales>("/admin/snapshots/insider-whales/latest"),
   latestRecommendations: () =>

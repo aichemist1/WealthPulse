@@ -19,6 +19,7 @@ class Form4Transaction:
     price_per_share: Optional[float]
     shares_owned_following: Optional[float]
     is_derivative: bool
+    is_10b5_1: Optional[bool] = None
 
 
 def _find_text(node: ET.Element, path: str) -> Optional[str]:
@@ -47,6 +48,17 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
         return None
 
 
+def _parse_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if v in {"1", "true", "t", "yes", "y"}:
+        return True
+    if v in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
+
+
 def parse_form4_xml(xml_text: str) -> list[Form4Transaction]:
     """
     Parse SEC Form 4 XML into transaction rows (non-derivative + derivative).
@@ -62,6 +74,10 @@ def parse_form4_xml(xml_text: str) -> list[Form4Transaction]:
 
     owner_cik = _find_text(root, "./reportingOwner/reportingOwnerId/rptOwnerCik")
     owner_name = _find_text(root, "./reportingOwner/reportingOwnerId/rptOwnerName")
+
+    # As of 2023+, many Form 4 XMLs include a 10b5-1 checkbox field.
+    # In the wild, this appears as <aff10b5One>0|1|false|true</aff10b5One>.
+    is_10b5_1 = _parse_bool(_find_text(root, "./aff10b5One"))
 
     transactions: list[Form4Transaction] = []
 
@@ -85,6 +101,7 @@ def parse_form4_xml(xml_text: str) -> list[Form4Transaction]:
             price_per_share=price,
             shares_owned_following=owned_following,
             is_derivative=is_derivative,
+            is_10b5_1=is_10b5_1,
         )
 
     for tx in root.findall("./nonDerivativeTable/nonDerivativeTransaction"):
@@ -93,4 +110,3 @@ def parse_form4_xml(xml_text: str) -> list[Form4Transaction]:
         transactions.append(parse_tx(tx, is_derivative=True))
 
     return transactions
-

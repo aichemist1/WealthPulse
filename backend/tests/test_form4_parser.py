@@ -40,4 +40,39 @@ def test_parse_form4_xml_minimal_non_derivative():
     assert tx.shares == 1000.0
     assert tx.price_per_share == 12.34
     assert tx.is_derivative is False
+    assert tx.is_10b5_1 is None
 
+
+def test_parse_form4_xml_10b5_flag():
+    xml = """<?xml version="1.0"?>
+    <ownershipDocument>
+      <issuer>
+        <issuerCik>0000123456</issuerCik>
+        <issuerTradingSymbol>ABCD</issuerTradingSymbol>
+      </issuer>
+      <reportingOwner>
+        <reportingOwnerId>
+          <rptOwnerCik>0000789012</rptOwnerCik>
+          <rptOwnerName>Jane Doe</rptOwnerName>
+        </reportingOwnerId>
+      </reportingOwner>
+      <aff10b5One>1</aff10b5One>
+      <nonDerivativeTable>
+        <nonDerivativeTransaction>
+          <transactionDate><value>2026-02-10</value></transactionDate>
+          <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+          <transactionAmounts>
+            <transactionShares><value>1000</value></transactionShares>
+            <transactionPricePerShare><value>12.34</value></transactionPricePerShare>
+            <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+          </transactionAmounts>
+          <postTransactionAmounts>
+            <sharesOwnedFollowingTransaction><value>1000</value></sharesOwnedFollowingTransaction>
+          </postTransactionAmounts>
+        </nonDerivativeTransaction>
+      </nonDerivativeTable>
+    </ownershipDocument>
+    """
+    txs = parse_form4_xml(xml)
+    assert len(txs) == 1
+    assert txs[0].is_10b5_1 is True

@@ -29,9 +29,15 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [x] Implement initial signals (13F accumulation snapshot + deltas; basic insider whale snapshot)
 - [x] Implement scoring + confidence (v0 13F-based Top Picks; Watch/Buy with corroborator gating + trend adjustment)
 - [x] Implement Fresh Whale Signals (SC13 + Form4 + trend/volume) snapshot (v0)
-- [ ] Implement segment eligibility + primary segment selection
-- [ ] Produce daily snapshot artifact (versioned, auditable)
-- [ ] Basic backtest harness (5D/20D) + baseline comparison
+- [x] Add score scale v0.1 (0–100 + 1–10 side-by-side) + clarify score vs confidence semantics
+- [x] Mapmaker v0.1: technical guardrails (SMA50/SMA200, extended-vs-support heuristics) and use as multiplier/penalty
+- [x] Auditor v0.1: Insider Quality Filter (Form 4 codes + 10b5-1 downweight + cluster buy detection)
+- [x] Divergence/conflict weighting v0.1 (explicit risk vs avoid rules when signals disagree)
+- [x] Social cashtag velocity listener (optional; feature-flagged, CSV/manual ingest path)
+  - Status: CSV/manual path + Reddit live-ingest adapter (`ingest-social-reddit`) + Runs coverage card are available in v0.1.
+- [x] Implement segment eligibility + primary segment selection
+- [x] Produce daily snapshot artifact (versioned, auditable)
+- [x] Basic backtest harness (5D/20D) + baseline comparison
 
 ## Phase 3 — Admin dashboard (Private)
 - [x] Dashboard: segments row (Themes)
@@ -45,7 +51,7 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [x] Admin QA view: snapshot health + run browser + coverage (moved to Runs tab)
 - [x] Admin-only Alerts feed (backend implemented; UI currently focused on subscriber alert review)
 - [x] Subscriber Alerts (manual send) card on Latest (auto-drafted daily; per-item send + send-all)
-- [ ] Admin authentication (login) + basic access control (before cloud deploy)
+- [x] Admin authentication (login) + basic access control
 
 ## Phase 4 — Subscriber alerts (Subscription)
 - [x] Subscription schema + double opt-in (confirm + unsubscribe tokens)
@@ -65,6 +71,8 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [ ] Backtesting harness + evaluation metrics
 - [ ] Vendor hardening (rate limits, retries, DLQ)
 - [ ] Performance tuning (caching, precompute, pagination)
+- [ ] Social listener scheduler (Reddit 10–15 min cadence; planned for future release)
+- [ ] Real-time price tracking (v0.2): intraday bars/quotes + freshness checks (cost-controlled)
 
 ## Deployment & Ops (v0)
 - [x] Docker Compose deployment artifacts (web/backend/db; Postgres)
@@ -72,3 +80,14 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [x] AWS SSM deploy script (no inbound SSH)
 - [x] Troubleshooting guide (restart/logs/common issues)
 - [ ] Cron job spec + implementation for daily ingestion/snapshots/draft generation on VM
+
+## Current Status (as of 2026-02-16)
+- MVP is functional end-to-end: ingestion → scoring → admin review → subscriber send.
+- Phase 2 core scoring milestones are complete through backtest harness v0.
+- Latest completed build-outs: daily snapshot artifact, backtest artifacts/API, Runs backtest card.
+- Next priority remains reliability/ops hardening (scheduler + data-quality warnings + observability).
+
+## Next 3 Execution Steps
+1. Add VM cron jobs for daily pipeline (`ingest` → `snapshots` → `daily artifact` → `draft alerts`).
+2. Add data-quality warnings in UI (stale feeds, low coverage, partial runs).
+3. Add minimal observability (pipeline run status + failure counters in Runs).

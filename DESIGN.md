@@ -166,6 +166,37 @@ For each evidence item, store and display:
 - **13D/13G:** high signal but may persist; allow older events to remain visible, but require at least one **7-day** corroborator (trend/catalyst/insider) for “buy now”.
 - **13F:** **not real-time** (quarterly, delayed). Treat as “institutional accumulation” context; never present as “just bought today”.
 
+## Insider Quality Filter (Form 4) (v0.1 design)
+Goal: reduce false positives from administrative/estate-planning activity and improve explainability by classifying Form 4 transactions into “signal vs noise”.
+
+### Transaction code mapping (practical v0.1)
+We treat **Code P** as the primary bullish insider signal, and filter/discount common non-informative codes:
+
+| Code | Meaning (simplified) | Treatment | Rationale |
+| --- | --- | --- | --- |
+| `P` | Open market purchase | **Strong bullish** | Insider used cash to buy now |
+| `S` | Open market sale | **Bearish / risk** | Potential distribution; context-dependent |
+| `A` | Grant/award | **Ignore** | Compensation, not discretionary |
+| `M` | Option exercise/conversion | **Ignore** | Often administrative; not “new conviction” |
+| `G` | Gift | **Ignore** | Estate/tax planning; not a market view |
+
+### 10b5-1 plan flag (intent/freshness filter)
+When the Form 4 indicates the trade was made under a **10b5-1 plan**, downweight its intent:
+- **10b5-1 buy:** small positive at most (scheduled)
+- **10b5-1 sell:** neutral to small negative (often scheduled liquidity)
+- **Non-10b5-1 discretionary buy/sell:** full weight
+
+### Cluster buy booster
+Detect “cluster buys” as a high-quality pattern:
+- **Rule:** ≥3 distinct insiders with **Code `P`** (and not 10b5-1) within a short window (e.g., 5 trading days)
+- **Effect:** boosts **confidence** and may add a small score bonus (kept explainable)
+
+### How this affects `score` vs `confidence`
+- `score` reflects *directional strength*; Form 4 `P` can add positive weight, `S` can subtract weight.
+- `confidence` reflects *how trustworthy the call is today*: recency + corroboration + data completeness.
+  - Example: A “buy” supported by **cluster buys** gets higher confidence than one supported by a single small purchase.
+  - Example: A “sell/risk” supported only by **10b5-1 sales** should have lower confidence.
+
 ### Market trends (v0)
 Compute and show trends at three levels, all at the same snapshot `as_of`:
 - **Market trend:** broad index proxy (e.g., SPY/QQQ equivalent for the chosen universe)
@@ -188,6 +219,96 @@ Keep internal boundaries strict to remain testable and allow future service extr
 7) **API**: dashboard endpoints + subscriber alert endpoints.
 8) **Alerts**: daily snapshot diff + message composition + delivery (email/SMS/push later).
 9) **Admin Tools**: segment priority, thresholds, allow/deny lists, audit.
+
+## “Listeners” model (operational design)
+To keep the system incremental and cheap while still feeling “agent-like”, we structure ingestion/feature computation as three always-on “listeners” that write auditable evidence into the database. This is still a modular monolith (single backend), but with clean internal boundaries.
+
+### Listener roles
+1) **Auditor** (regulatory + “big money” intent)
+   - Watches SEC filings that imply intent/positioning (starting with **Form 4** and **SC 13D/13G**).
+   - Applies normalization + dedupe + quality filters (e.g., Form 4 transaction codes and **10b5-1 downweighting**).
+   - Produces “fresh corroborators” and risk flags (e.g., insider sell vs cluster buy).
+   - Optional later: **Options flow / dark pool** signals (vendor-dependent; off by default for pilot).
+
+2) **Listener** (social attention / cashtag velocity)
+   - Collects **cashtag mention velocity** (Reddit/X) and a lightweight polarity signal (keyword-based at first).
+   - Implements noise controls (cooldown / persistence across multiple refresh cycles before materially affecting scores).
+   - Pilot stance: keep this **optional** and behind a feature flag until we decide on sources and rate limits.
+
+3) **Mapmaker** (technicals “floor/ceiling” guardrails)
+   - Maintains technical features per ticker (at minimum **SMA50/SMA200**, plus simple support/resistance approximations).
+   - Outputs a technical factor used as a **multiplier/penalty** so we avoid “whale trap” recommendations at major resistance.
+
+### Evidence contract (shared output)
+Each listener should emit evidence in a common shape so the recommender can remain simple and explainable:
+- `signal_dir`: bullish | bearish | neutral
+- `signal_strength`: 0..1
+- `freshness`: 0..1 (recency + source lag)
+- `source`: form4 | sc13 | price | social | (future: options)
+- `explain`: short text suitable for the detail drawer
+
+## Refresh policy (lanes + cost control) (v0.1 design)
+Rather than “refresh everything constantly”, we run each listener on an interval appropriate to the data source and cost profile.
+
+### Lanes (pilot defaults)
+- **Fast lane (15–60 minutes during market hours):** Mapmaker (prices → SMA features, trend, distance-to-level)
+  - Rationale: good enough for a pilot; avoids high-frequency data costs.
+- **Medium lane (10–30 minutes, best-effort weekdays):** Auditor (SEC EDGAR polling/backfill)
+  - Rationale: SEC updates are bursty; polling too frequently risks blocks.
+- **Medium lane (10–15 minutes, optional):** Listener (social mentions)
+  - Rationale: social moves in “waves”; persistence check prevents reacting to single spikes.
+- **Slow lane (daily):** fundamentals / static reference data (e.g., sector mappings, dividend metadata)
+
+### Scheduling mechanism (v0)
+- Local/dev: run on-demand via CLI and the demo script.
+- VM/prod: run via **cron** (or a single lightweight scheduler process) calling the same CLI commands.
+- All refresh intervals are configuration, not code constants.
+
+## Priority of changes (lowest-risk → highest-value first)
+These priorities are designed to be **incremental** and to improve perceived product value quickly without adding many new components.
+
+1) **Scoring semantics + scale (additive)**
+   - Add a **1–10 score** alongside the existing 0–100 score (do not replace immediately).
+   - Clarify the meaning: `score` is directional strength; `confidence` is freshness + corroboration + data completeness (not “expected return”).
+
+2) **Mapmaker technical guardrails (cheap, high leverage)**
+   - Expand the existing trend corroborator into a “technical guardrail” module:
+     - SMA50/SMA200, distance-to-level heuristics, “extended vs support” labeling.
+   - Use technicals primarily as a **multiplier/penalty** to reduce “chasing at resistance”.
+
+3) **Auditor: Form 4 quality filters (reduce noise)**
+   - Apply the **Insider Quality Filter** (transaction codes + 10b5-1 downweighting + cluster buys).
+   - Surface this explicitly in the detail drawer as explainable evidence.
+
+4) **Divergence/conflict rules (once we have consistent multi-signal coverage)**
+   - When two sources disagree (e.g., insider selling but strong technical trend), encode explicit “risk vs avoid” logic and show it.
+   - Keep hierarchy simple: high-quality “big money” intent > social; technicals act as guardrails.
+
+5) **Listener: Social cashtag velocity (optional; add last)**
+   - Add only after the above is stable; keep to velocity + persistence checks to avoid noise.
+   - Keep it feature-flagged until sources + rate limits are chosen.
+
+6) **Options flow / dark pool (vendor-dependent)**
+   - Do not block MVP value on this; add only when a reliable provider + budget is selected.
+
+## Architecture alignment (ARCHITECTURE.md) — deferred items (v0.2/v0.3)
+`ARCHITECTURE.md` describes a fuller “agent” with more signals, real-time cadence, and explicit exit logic. The v0.1 design above intentionally delivers value with minimal cost/ops risk. The items below remain aligned with the architecture but are **deferred**.
+
+### Deferred to v0.2
+- **Technical multiplier (Ft) spec:** codify explicit “at support / neutral / at resistance” multiplier buckets and “extended” penalties.
+- **Divergence rules (explicit):** implement and document concrete conflict weighting (e.g., 80/20 hierarchy) and “liquidity trap” warnings.
+- **Social persistence rules:** require a spike to persist across at least two refresh cycles before meaningfully boosting scores.
+- **Dashboard widgets:** add higher-signal visuals (conviction gauge + divergence quadrant) once inputs are stable.
+
+### Deferred to v0.3+
+- **Exit strategy / signal decay:** hedge/flip detection, blow-off top logic, resistance failure, and a reproducible “exit score/decay” model.
+- **Push/real-time alerts:** beyond daily draft alerts (e.g., “score high and within 2% of support” immediate notifications).
+- **Options flow / dark pools:** requires a vendor provider + budget + rate-limit handling; off by default for pilot.
+- **Fundamentals-heavy model & broader factors:** analyst ratings, news sentiment, broader fundamentals, and long-horizon weighting.
+- **10b5-1 plan adoption detection from 10-Q/10-K:** exception logic for plan adoptions (more parsing and coverage work).
+
+### Real-time cadence note (intentional)
+`ARCHITECTURE.md` references second/minute-level refresh for some sources. For the pilot, v0.1 uses **cost-controlled refresh lanes** (minutes to hourly) and prefers auditable daily artifacts; we can tighten cadence later once reliability and sources are proven.
 
 ## Data Layers (reliability + audit)
 - **Raw immutable store**: store original filings/news payloads for replay and audit.

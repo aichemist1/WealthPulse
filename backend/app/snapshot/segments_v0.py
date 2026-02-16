@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Optional
 
 from sqlmodel import Session, select
@@ -26,6 +25,14 @@ class SegmentBucket:
     name: str
     as_of: Optional[str]
     picks: list[SegmentPick]
+
+
+@dataclass(frozen=True)
+class SegmentCandidate:
+    key: str
+    priority: int
+    strength: float
+    pick: SegmentPick
 
 
 def _latest_run(session: Session, kind: str) -> Optional[SnapshotRun]:
@@ -61,6 +68,42 @@ def _fmt_millions(x: float) -> str:
     return f"{sign}{v:.0f}"
 
 
+def _to_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def _to_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def _choose_primary_segment(cands: list[SegmentCandidate]) -> Optional[SegmentCandidate]:
+    """
+    Primary segment selection by eligibility strength (not static bucket priority).
+
+    Tie-breaker: lower priority value wins.
+    Risk override: only force Risk when bearish evidence is materially stronger.
+    """
+
+    if not cands:
+        return None
+    by_strength = sorted(cands, key=lambda c: (c.strength, -c.priority), reverse=True)
+    top = by_strength[0]
+
+    # Avoid over-classifying as Risk on mixed setups.
+    risk = next((c for c in by_strength if c.key == "risk"), None)
+    if risk and top.key != "risk":
+        if risk.strength >= (top.strength + 6.0):
+            return risk
+
+    return top
+
+
 def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict[str, Any]:
     """
     v0 segment buckets for the dashboard "Themes" row.
@@ -94,147 +137,204 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
             ).all()
         )
 
-    # Candidate pools (derived from reasons so we don't have to query extra tables).
-    insider_cands: list[SegmentPick] = []
-    activist_cands: list[SegmentPick] = []
-    momentum_cands: list[SegmentPick] = []
-    risk_cands: list[SegmentPick] = []
-    inst_cands: list[SegmentPick] = []
+    # Build one merged evidence view per ticker.
+    fresh_by_ticker = {r.ticker: r for r in fresh_rows}
+    recs_by_ticker = {r.ticker: r for r in recs_rows}
+    all_tickers = sorted(set(fresh_by_ticker.keys()) | set(recs_by_ticker.keys()))
 
-    for r in fresh_rows:
-        reasons = r.reasons or {}
-        sc13_count = int(_safe_get(reasons, "sc13", "count") or 0)
-        sc13_latest = _safe_get(reasons, "sc13", "latest_filed_at")
-        buy_value = float(_safe_get(reasons, "insider", "buy_value") or 0.0)
-        sell_value = float(_safe_get(reasons, "insider", "sell_value") or 0.0)
-        net_value = float(_safe_get(reasons, "insider", "net_value") or (buy_value - sell_value))
-        trend_bull = bool(_safe_get(reasons, "trend_flags", "bullish_recent") or False)
-        trend_bear = bool(_safe_get(reasons, "trend_flags", "bearish_recent") or False)
-        ret20 = _safe_get(reasons, "trend", "return_20d")
+    SEGMENT_PRIORITY = {
+        "insider": 1,
+        "activist": 2,
+        "institutional": 3,
+        "momentum": 4,
+        "risk": 5,
+    }
+
+    segment_picks: dict[str, list[SegmentCandidate]] = {k: [] for k in SEGMENT_PRIORITY.keys()}
+    assignment: dict[str, str] = {}
+
+    for ticker in all_tickers:
+        fresh = fresh_by_ticker.get(ticker)
+        recs = recs_by_ticker.get(ticker)
+
+        fresh_reasons = (fresh.reasons if fresh else None) or {}
+        rec_reasons = (recs.reasons if recs else None) or {}
+
+        fresh_score = _to_int(fresh.score if fresh else 0, 0)
+        fresh_conf = _to_float(fresh.confidence if fresh else 0.0, 0.0)
+        rec_score = _to_int(recs.score if recs else 0, 0)
+        rec_conf = _to_float(recs.confidence if recs else 0.0, 0.0)
+
+        sc13_count = _to_int(_safe_get(fresh_reasons, "sc13", "count"), 0)
+        sc13_latest = _safe_get(fresh_reasons, "sc13", "latest_filed_at")
+        buy_value = _to_float(_safe_get(fresh_reasons, "insider", "buy_value"), 0.0)
+        sell_value = _to_float(_safe_get(fresh_reasons, "insider", "sell_value"), 0.0)
+        net_value = _to_float(_safe_get(fresh_reasons, "insider", "net_value"), buy_value - sell_value)
+        cluster_buy = bool(_safe_get(fresh_reasons, "insider_quality", "cluster_buy") or False)
+        trend_bull = bool(_safe_get(fresh_reasons, "trend_flags", "bullish_recent") or False)
+        trend_bear = bool(_safe_get(fresh_reasons, "trend_flags", "bearish_recent") or False)
+        ret20 = _safe_get(fresh_reasons, "trend", "return_20d")
         ret20_s = f"{float(ret20) * 100:.1f}%" if isinstance(ret20, (int, float)) else "n/a"
 
-        if buy_value > 0:
-            insider_cands.append(
-                SegmentPick(
-                    ticker=r.ticker,
-                    score=int(r.score),
-                    action=r.action,
-                    confidence=float(r.confidence),
-                    why=f"Insider net ${_fmt_millions(net_value)} · Trend {'bull' if trend_bull else 'n/a'}",
-                    source_kind="fresh_signals_v0",
-                )
-            )
-        if sc13_count > 0:
-            activist_cands.append(
-                SegmentPick(
-                    ticker=r.ticker,
-                    score=int(r.score),
-                    action=r.action,
-                    confidence=float(r.confidence),
-                    why=f"SC13 x{sc13_count} · latest {str(sc13_latest)[:10] if sc13_latest else 'n/a'}",
-                    source_kind="fresh_signals_v0",
-                )
-            )
-        if trend_bull:
-            momentum_cands.append(
-                SegmentPick(
-                    ticker=r.ticker,
-                    score=int(r.score),
-                    action=r.action,
-                    confidence=float(r.confidence),
-                    why=f"Trend bull · 20D {ret20_s}",
-                    source_kind="fresh_signals_v0",
-                )
-            )
-        if r.action == "avoid" or trend_bear or sell_value > buy_value:
-            risk_cands.append(
-                SegmentPick(
-                    ticker=r.ticker,
-                    score=int(r.score),
-                    action=r.action,
-                    confidence=float(r.confidence),
-                    why=f"Bearish setup · insider sell ${_fmt_millions(sell_value)}",
-                    source_kind="fresh_signals_v0",
+        delta = _to_float(_safe_get(rec_reasons, "delta_value_usd"), 0.0)
+        inc = _to_int(_safe_get(rec_reasons, "breadth", "increase"), 0)
+        total = max(1, _to_int(_safe_get(rec_reasons, "breadth", "total"), 0))
+        breadth_ratio = inc / total
+        trend_recent_top = bool(_safe_get(rec_reasons, "corroborators", "trend_bullish_recent") or False)
+        trend_adj = _to_int(_safe_get(rec_reasons, "trend_adjustment"), 0)
+        divergence_type = str(_safe_get(fresh_reasons, "divergence", "type") or "")
+
+        cands: list[SegmentCandidate] = []
+
+        if fresh and buy_value > 0:
+            strength = float(fresh_score) + (4.0 if cluster_buy else 0.0) + min(6.0, (buy_value / 1_000_000.0))
+            cands.append(
+                SegmentCandidate(
+                    key="insider",
+                    priority=SEGMENT_PRIORITY["insider"],
+                    strength=strength,
+                    pick=SegmentPick(
+                        ticker=ticker,
+                        score=fresh_score,
+                        action=fresh.action,
+                        confidence=fresh_conf,
+                        why=f"Insider net ${_fmt_millions(net_value)} · cluster {'yes' if cluster_buy else 'no'}",
+                        source_kind="fresh_signals_v0",
+                    ),
                 )
             )
 
-    for r in recs_rows:
-        reasons = r.reasons or {}
-        delta = _safe_get(reasons, "delta_value_usd")
-        inc = _safe_get(reasons, "breadth", "increase")
-        total = _safe_get(reasons, "breadth", "total")
-        trend_recent = bool(_safe_get(reasons, "corroborators", "trend_bullish_recent") or False)
-        trend_adj = int(_safe_get(reasons, "trend_adjustment") or 0)
-        inst_cands.append(
-            SegmentPick(
-                ticker=r.ticker,
-                score=int(r.score),
-                action=r.action,
-                confidence=float(r.confidence),
-                why=f"13F Δ ${_fmt_millions(float(delta or 0))} · mgrs {int(inc or 0)}/{int(total or 0)} · trend {trend_adj:+d}",
-                source_kind="recommendations_v0",
-            )
-        )
-        if trend_recent:
-            momentum_cands.append(
-                SegmentPick(
-                    ticker=r.ticker,
-                    score=int(r.score),
-                    action=r.action,
-                    confidence=float(r.confidence),
-                    why=f"Trend bull · from Top Picks",
-                    source_kind="recommendations_v0",
+        if fresh and sc13_count > 0:
+            strength = float(fresh_score) + min(8.0, 2.0 * float(sc13_count))
+            cands.append(
+                SegmentCandidate(
+                    key="activist",
+                    priority=SEGMENT_PRIORITY["activist"],
+                    strength=strength,
+                    pick=SegmentPick(
+                        ticker=ticker,
+                        score=fresh_score,
+                        action=fresh.action,
+                        confidence=fresh_conf,
+                        why=f"SC13 x{sc13_count} · latest {str(sc13_latest)[:10] if sc13_latest else 'n/a'}",
+                        source_kind="fresh_signals_v0",
+                    ),
                 )
             )
 
-    # Stable ordering: score desc then confidence.
-    def _sort(xs: list[SegmentPick]) -> list[SegmentPick]:
-        return sorted(xs, key=lambda p: (p.score, p.confidence), reverse=True)
+        if recs and delta > 0:
+            strength = float(rec_score) + (10.0 * float(breadth_ratio)) + min(6.0, delta / 1_000_000_000.0)
+            cands.append(
+                SegmentCandidate(
+                    key="institutional",
+                    priority=SEGMENT_PRIORITY["institutional"],
+                    strength=strength,
+                    pick=SegmentPick(
+                        ticker=ticker,
+                        score=rec_score,
+                        action=recs.action,
+                        confidence=rec_conf,
+                        why=f"13F Δ ${_fmt_millions(delta)} · mgrs {inc}/{total} · trend {trend_adj:+d}",
+                        source_kind="recommendations_v0",
+                    ),
+                )
+            )
 
-    insider_cands = _sort(insider_cands)
-    activist_cands = _sort(activist_cands)
-    inst_cands = _sort(inst_cands)
-    momentum_cands = _sort(momentum_cands)
-    risk_cands = _sort(risk_cands)
+        if (fresh and trend_bull and not trend_bear) or (recs and trend_recent_top):
+            mom_score = max(fresh_score, rec_score)
+            mom_conf = max(fresh_conf, rec_conf)
+            mom_source = "fresh_signals_v0" if (fresh and trend_bull and not trend_bear) else "recommendations_v0"
+            strength = float(mom_score) + (3.0 if trend_bull else 0.0)
+            cands.append(
+                SegmentCandidate(
+                    key="momentum",
+                    priority=SEGMENT_PRIORITY["momentum"],
+                    strength=strength,
+                    pick=SegmentPick(
+                        ticker=ticker,
+                        score=mom_score,
+                        action=(fresh.action if fresh and mom_source == "fresh_signals_v0" else (recs.action if recs else "watch")),
+                        confidence=mom_conf,
+                        why=f"Trend bull · 20D {ret20_s}",
+                        source_kind=mom_source,
+                    ),
+                )
+            )
 
-    # Apply one-ticker-one-segment in priority order.
-    used: set[str] = set()
+        risk_points = 0.0
+        if fresh and fresh.action == "avoid":
+            risk_points += 16.0
+        if recs and recs.action == "avoid":
+            risk_points += 10.0
+        if trend_bear:
+            risk_points += 10.0
+        if sell_value > buy_value:
+            risk_points += 8.0
+        if divergence_type in {"bearish_divergence", "sc13_trend_conflict"}:
+            risk_points += 8.0
+        if risk_points > 0 and fresh:
+            cands.append(
+                SegmentCandidate(
+                    key="risk",
+                    priority=SEGMENT_PRIORITY["risk"],
+                    strength=float(max(fresh_score, rec_score)) + risk_points,
+                    pick=SegmentPick(
+                        ticker=ticker,
+                        score=max(fresh_score, rec_score),
+                        action="avoid",
+                        confidence=max(fresh_conf, rec_conf),
+                        why=f"Bearish setup · insider sell ${_fmt_millions(sell_value)}",
+                        source_kind="fresh_signals_v0",
+                    ),
+                )
+            )
 
-    def _take(cands: list[SegmentPick]) -> list[SegmentPick]:
-        out: list[SegmentPick] = []
-        for p in cands:
-            if p.ticker in used:
-                continue
-            used.add(p.ticker)
-            out.append(p)
-            if len(out) >= picks_per_segment:
-                break
-        return out
+        primary = _choose_primary_segment(cands)
+        if primary is None:
+            continue
+        assignment[ticker] = primary.key
+        segment_picks[primary.key].append(primary)
 
-    now = datetime.utcnow().isoformat()
+    def _sort(xs: list[SegmentCandidate]) -> list[SegmentPick]:
+        return [c.pick for c in sorted(xs, key=lambda c: (c.strength, c.pick.confidence), reverse=True)]
+
+    insider_cands = _sort(segment_picks["insider"])
+    activist_cands = _sort(segment_picks["activist"])
+    inst_cands = _sort(segment_picks["institutional"])
+    momentum_cands = _sort(segment_picks["momentum"])
+    risk_cands = _sort(segment_picks["risk"])
+
+    now = max(
+        [x for x in [(fresh_run.as_of.isoformat() if fresh_run else None), (recs_run.as_of.isoformat() if recs_run else None)] if x],
+        default=None,
+    )
     def _bucket(key: str, name: str, as_of: Optional[str], picks: list[SegmentPick]) -> dict[str, Any]:
         return {
             "key": key,
             "name": name,
             "as_of": as_of,
-            "picks": [p.__dict__ for p in picks],
+            "picks": [p.__dict__ for p in picks[: max(1, picks_per_segment)]],
         }
 
     return {
         "as_of": now,
+        "meta": {
+            "selection": "eligibility_strength_primary_segment",
+            "ticker_assignment_count": len(assignment),
+        },
         "segments": [
-            _bucket("insider", "Insider Activity", fresh_run.as_of.isoformat() if fresh_run else None, _take(insider_cands)),
+            _bucket("insider", "Insider Activity", fresh_run.as_of.isoformat() if fresh_run else None, insider_cands),
             _bucket(
                 "activist",
                 "Activist / Large Owner",
                 fresh_run.as_of.isoformat() if fresh_run else None,
-                _take(activist_cands),
+                activist_cands,
             ),
             _bucket(
                 "institutional",
                 "Institutional Accumulation",
                 recs_run.as_of.isoformat() if recs_run else None,
-                _take(inst_cands),
+                inst_cands,
             ),
             _bucket(
                 "momentum",
@@ -250,8 +350,8 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
                     ],
                     default=None,
                 ),
-                _take(momentum_cands),
+                momentum_cands,
             ),
-            _bucket("risk", "Risk / Avoid", fresh_run.as_of.isoformat() if fresh_run else None, _take(risk_cands)),
+            _bucket("risk", "Risk / Avoid", fresh_run.as_of.isoformat() if fresh_run else None, risk_cands),
         ],
     }

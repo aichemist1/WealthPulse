@@ -11,7 +11,7 @@ from app.connectors.edgar_daily_index import filter_rows, master_idx_url, parse_
 from app.connectors.edgar_form4_filing import parse_form4_filing_text
 from app.connectors.form4 import parse_form4_xml
 from app.connectors.sec_edgar import SecEdgarClient
-from app.models import Event, Filing, InsiderTx, Investor, RawPayload, Stock
+from app.models import Event, Filing, InsiderTx, InsiderTxMeta, Investor, RawPayload, Stock
 
 
 def _sha256(data: bytes) -> str:
@@ -217,6 +217,8 @@ def ingest_form4_day(
                 seq=j,
             )
             session.add(insider_tx)
+            session.flush()
+            session.add(InsiderTxMeta(insider_tx_id=insider_tx.id, is_10b5_1=tx.is_10b5_1))
             tx_inserted += 1
 
         session.commit()
