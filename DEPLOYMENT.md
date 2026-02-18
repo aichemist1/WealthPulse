@@ -217,12 +217,31 @@ Recommended cadence (pilot):
 - **Daily**: refresh data (best-effort), compute snapshots, generate the subscriber alert draft
 - **Manual**: admin reviews and clicks Send in the dashboard (no auto-send)
 
-Example cron outline (exact commands finalized once Compose service names are fixed):
-- `docker compose exec -T backend python -m app.cli ingest-form4-edgar --day YYYY-MM-DD --limit N`
-- `docker compose exec -T backend python -m app.cli ingest-sc13-edgar --day YYYY-MM-DD --limit N`
-- `docker compose exec -T backend python -m app.cli snapshot-recommendations-v0 ...`
-- `docker compose exec -T backend python -m app.cli snapshot-fresh-signals-v0 ...`
-- `docker compose exec -T backend python -m app.cli send-daily-subscriber-alerts-v0` (draft-only by default)
+Implemented scripts:
+- `scripts/pipeline_daily_compose.sh`
+  - runs ingestion + snapshots + daily artifact + backtest + draft alert generation
+  - draft is manual-only (no email send)
+- `scripts/install_daily_pipeline_cron.sh`
+  - installs weekday cron entry (default `35 13 * * 1-5`, UTC)
+
+Install cron on VM:
+```bash
+cd /opt/wealthpulse
+chmod +x scripts/pipeline_daily_compose.sh scripts/install_daily_pipeline_cron.sh
+bash scripts/install_daily_pipeline_cron.sh
+```
+
+Run once manually:
+```bash
+cd /opt/wealthpulse
+bash scripts/pipeline_daily_compose.sh
+```
+
+Optional env knobs (set in shell or cron environment):
+- `WEALTHPULSE_PIPELINE_FORM4_LIMIT` (default `200`)
+- `WEALTHPULSE_PIPELINE_SC13_LIMIT` (default `200`)
+- `WEALTHPULSE_PIPELINE_RUN_REDDIT_INGEST` (`true|false`, default `false`)
+- `WEALTHPULSE_PIPELINE_RUN_BACKTEST` (`true|false`, default `true`)
 
 ## Smoke-test checklist (per deploy)
 After `docker compose up -d`:

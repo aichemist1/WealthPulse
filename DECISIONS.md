@@ -246,3 +246,13 @@ Record decisions here so we can resume without re-deriving context.
 - Persists auditable backtest artifacts in `backtest_runs` and exposes latest via:
   - `GET /admin/backtests/latest`
 - Admin Runs tab now includes a read-only Backtest card (coverage, hit-rate, excess return) sourced from latest backtest artifact.
+
+## 2026-02-16 — Daily pipeline scheduler (VM cron, v0)
+- Added production-oriented pipeline runner script:
+  - `scripts/pipeline_daily_compose.sh`
+  - Sequence: init-db → ingest (Form4/SC13 best-effort) → snapshots → daily artifact → backtest (optional) → draft alerts.
+- Added cron installer helper:
+  - `scripts/install_daily_pipeline_cron.sh`
+  - default schedule: weekdays `13:35 UTC`.
+- Delivery remains manual-only:
+  - pipeline generates subscriber draft run; admin still sends from dashboard.

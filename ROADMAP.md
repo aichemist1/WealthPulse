@@ -79,7 +79,7 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [x] Cloud-agnostic VM deploy script (SSH/rsync)
 - [x] AWS SSM deploy script (no inbound SSH)
 - [x] Troubleshooting guide (restart/logs/common issues)
-- [ ] Cron job spec + implementation for daily ingestion/snapshots/draft generation on VM
+- [x] Cron job spec + implementation for daily ingestion/snapshots/draft generation on VM
 
 ## Current Status (as of 2026-02-16)
 - MVP is functional end-to-end: ingestion → scoring → admin review → subscriber send.
@@ -88,6 +88,6 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - Next priority remains reliability/ops hardening (scheduler + data-quality warnings + observability).
 
 ## Next 3 Execution Steps
-1. Add VM cron jobs for daily pipeline (`ingest` → `snapshots` → `daily artifact` → `draft alerts`).
-2. Add data-quality warnings in UI (stale feeds, low coverage, partial runs).
-3. Add minimal observability (pipeline run status + failure counters in Runs).
+1. Add data-quality warnings in UI (stale feeds, low coverage, partial runs).
+2. Add minimal observability (pipeline run status + failure counters in Runs).
+3. Add runbook checks for pipeline freshness in Runs + troubleshooting docs.

@@ -31,6 +31,27 @@ cd /opt/wealthpulse
 sudo docker compose --env-file prod.env up -d --build --force-recreate backend
 ```
 
+## Daily pipeline (manual rerun + cron)
+
+### Run the full daily pipeline now
+```bash
+cd /opt/wealthpulse
+bash scripts/pipeline_daily_compose.sh
+```
+
+### Check pipeline logs
+```bash
+sudo tail -n 200 /var/log/wealthpulse/daily_pipeline.log
+```
+
+### Check/install cron entry
+```bash
+crontab -l | grep wealthpulse-daily-pipeline || true
+cd /opt/wealthpulse
+bash scripts/install_daily_pipeline_cron.sh
+crontab -l
+```
+
 ### Recreate only web (Caddy + frontend)
 Use this after changing `Caddyfile` or frontend build behavior.
 ```bash
@@ -133,4 +154,3 @@ From the VM:
 cd /opt/wealthpulse
 WEALTHPULSE_BASE_URL="http://127.0.0.1" bash scripts/deploy_smoke_test.sh
 ```
-
