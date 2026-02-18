@@ -250,12 +250,12 @@ Record decisions here so we can resume without re-deriving context.
 ## 2026-02-16 — Daily pipeline scheduler (VM cron, v0)
 - Added production-oriented pipeline runner script:
   - `scripts/pipeline_daily_compose.sh`
-  - Sequence: init-db → ingest (Form4/SC13 best-effort) → snapshots → daily artifact → backtest (optional) → draft alerts.
+  - wrapper for backend command `run-daily-pipeline-v0`.
 - Added cron installer helper:
   - `scripts/install_daily_pipeline_cron.sh`
   - default schedule: weekdays `13:35 UTC`.
-- Added one-command verification helper:
-  - `scripts/pipeline_status_compose.sh`
-  - prints container status + ingestion/snapshot/artifact freshness + recent pipeline logs.
+- Added backend status command:
+  - `python -m app.cli pipeline-status-v0`
+  - prints ingestion/snapshot/artifact freshness + draft status.
 - Delivery remains manual-only:
   - pipeline generates subscriber draft run; admin still sends from dashboard.

@@ -219,7 +219,7 @@ Recommended cadence (pilot):
 
 Implemented scripts:
 - `scripts/pipeline_daily_compose.sh`
-  - runs ingestion + snapshots + daily artifact + backtest + draft alert generation
+  - thin wrapper around backend command `run-daily-pipeline-v0`
   - draft is manual-only (no email send)
 - `scripts/install_daily_pipeline_cron.sh`
   - installs weekday cron entry (default `35 13 * * 1-5`, UTC)
@@ -240,12 +240,13 @@ bash scripts/pipeline_daily_compose.sh
 Verify quickly:
 ```bash
 cd /opt/wealthpulse
-bash scripts/pipeline_status_compose.sh
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli pipeline-status-v0 --lookback-days 7
 ```
 
 Optional env knobs (set in shell or cron environment):
-- `WEALTHPULSE_PIPELINE_FORM4_LIMIT` (default `200`)
-- `WEALTHPULSE_PIPELINE_SC13_LIMIT` (default `200`)
+- `WEALTHPULSE_PIPELINE_SEC_LOOKBACK_DAYS` (default `3`)
+- `WEALTHPULSE_PIPELINE_SEC_LIMIT` (default `200`)
+- `WEALTHPULSE_PIPELINE_BOOTSTRAP_13F_IF_MISSING` (`true|false`, default `true`)
 - `WEALTHPULSE_PIPELINE_RUN_REDDIT_INGEST` (`true|false`, default `false`)
 - `WEALTHPULSE_PIPELINE_RUN_BACKTEST` (`true|false`, default `true`)
 

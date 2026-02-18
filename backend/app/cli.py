@@ -1589,6 +1589,153 @@ def pipeline_status_v0(
     typer.echo(f"latest_alert_run_status: {(latest_alert.status if latest_alert else 'n/a')}")
 
 
+@app.command("run-daily-pipeline-v0")
+def run_daily_pipeline_v0(
+    as_of: str = typer.Option("", help="As-of datetime (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS; default now UTC)"),
+    sec_lookback_days: int = typer.Option(3, help="Try SEC ingestion for this many prior days"),
+    sec_limit: int = typer.Option(200, help="Per-day SEC ingest filing limit (Form4/SC13)"),
+    bootstrap_13f_if_missing: bool = typer.Option(True, help="If no 13F snapshot exists, bootstrap 13F ingest+mapping"),
+    top_n: int = typer.Option(20, help="Top rows per snapshot"),
+    run_reddit_ingest: bool = typer.Option(False, help="Run Reddit social ingest step"),
+    run_backtest: bool = typer.Option(True, help="Run backtest step"),
+    backtest_lookback_days: int = typer.Option(120, help="Backtest historical window days"),
+) -> None:
+    """
+    Production daily pipeline in backend code (single command).
+    Includes data fetch, snapshots, artifacts, and draft alert generation.
+    """
+
+    as_of_dt: datetime
+    if as_of.strip():
+        try:
+            if "T" in as_of:
+                as_of_dt = datetime.fromisoformat(as_of)
+            else:
+                y, m, d = (int(x) for x in as_of.split("-"))
+                as_of_dt = datetime(y, m, d, 23, 59, 59)
+        except Exception:
+            raise typer.BadParameter("as_of must be YYYY-MM-DD or ISO datetime")
+    else:
+        as_of_dt = datetime.utcnow()
+
+    client = default_sec_client()
+    typer.echo(f"[pipeline] start as_of={as_of_dt.isoformat()}")
+
+    # 1) Best-effort SEC ingestion with fallback days.
+    f4_ingested = 0
+    sc13_ingested = 0
+    for offset in range(1, max(1, sec_lookback_days) + 1):
+        day = (as_of_dt - timedelta(days=offset)).date()
+        with Session(engine) as session:
+            try:
+                r = ingest_form4_day(session=session, client=client, day=day, universe_tickers=None, limit=sec_limit)
+                f4_ingested += int(getattr(r, "filings_ingested", 0) or 0)
+                typer.echo(f"[pipeline] form4 day={day.isoformat()} seen={r.filings_seen} ingested={r.filings_ingested}")
+            except Exception as e:
+                typer.echo(f"[pipeline] WARN form4 day={day.isoformat()} failed: {e}")
+            try:
+                r2 = ingest_sc13_day(session=session, client=client, day=day, universe_tickers=None, limit=sec_limit)
+                sc13_ingested += int(getattr(r2, "filings_ingested", 0) or 0)
+                typer.echo(f"[pipeline] sc13 day={day.isoformat()} seen={r2.filings_seen} ingested={r2.filings_ingested}")
+            except Exception as e:
+                typer.echo(f"[pipeline] WARN sc13 day={day.isoformat()} failed: {e}")
+
+    # 2) Optional social ingest.
+    if run_reddit_ingest:
+        try:
+            ingest_social_reddit(lookback_hours=24, dry_run=False)
+        except Exception as e:
+            typer.echo(f"[pipeline] WARN reddit ingest failed: {e}")
+
+    # 3) Ensure watchlist prices and dividend fundamentals refresh.
+    watch_tickers = parse_ticker_csv(settings.watchlist_etfs) + parse_ticker_csv(settings.watchlist_dividend_stocks)
+    watch_tickers = list(dict.fromkeys([*watch_tickers, "SPY"]))
+    if watch_tickers:
+        try:
+            with Session(engine) as session:
+                res = ingest_stooq_prices(session=session, tickers=watch_tickers, keep_last_days=260)
+            typer.echo(f"[pipeline] prices tickers_seen={res.tickers_seen} bars_inserted={res.bars_inserted}")
+        except Exception as e:
+            typer.echo(f"[pipeline] WARN prices ingest failed: {e}")
+    try:
+        ingest_dividend_metrics_yahoo(tickers=",".join(parse_ticker_csv(settings.watchlist_dividend_stocks)))
+    except Exception as e:
+        typer.echo(f"[pipeline] WARN dividend metrics ingest failed: {e}")
+
+    # 4) 13F bootstrap (only when missing) to avoid empty Top Picks on fresh deployments.
+    need_13f_bootstrap = False
+    with Session(engine) as session:
+        latest_13f = session.exec(
+            select(SnapshotRun).where(col(SnapshotRun.kind) == "13f_whales").order_by(col(SnapshotRun.as_of).desc(), col(SnapshotRun.created_at).desc())
+        ).first()
+        need_13f_bootstrap = latest_13f is None
+
+    if bootstrap_13f_if_missing and need_13f_bootstrap:
+        typer.echo("[pipeline] 13F snapshot missing; running bootstrap ingest.")
+        bootstrap_days = [(as_of_dt - timedelta(days=93)).date(), (as_of_dt - timedelta(days=1)).date()]
+        for d in bootstrap_days:
+            with Session(engine) as session:
+                try:
+                    r = ingest_13f_day(session=session, client=client, day=d, limit=0)
+                    typer.echo(f"[pipeline] 13f day={d.isoformat()} seen={r.filings_seen} ingested={r.filings_ingested} holdings={r.holdings_inserted}")
+                except Exception as e:
+                    typer.echo(f"[pipeline] WARN 13f day={d.isoformat()} failed: {e}")
+        try:
+            enrich_security_map_openfigi(limit=800, batch_size=10)
+        except Exception as e:
+            typer.echo(f"[pipeline] WARN openfigi enrichment failed: {e}")
+
+    # 5) Compute snapshot stack.
+    report_p = previous_quarter_end(as_of_dt.date()) or previous_quarter_end((as_of_dt - timedelta(days=1)).date())
+    if report_p is not None:
+        try:
+            snapshot_13f_whales(report_period=report_p.isoformat(), top_n=top_n)
+        except Exception as e:
+            typer.echo(f"[pipeline] WARN snapshot-13f-whales failed: {e}")
+    else:
+        typer.echo("[pipeline] WARN no prior quarter end available for 13F snapshot.")
+
+    as_of_s = as_of_dt.isoformat(timespec="seconds")
+    snapshot_recommendations_v0(
+        as_of=as_of_s,
+        top_n=top_n,
+        fresh_days=7,
+        buy_score_threshold=70,
+        insider_min_value=100_000,
+    )
+    snapshot_fresh_signals_v0(
+        as_of=as_of_s,
+        fresh_days=30,
+        insider_min_value=10_000,
+        buy_score_threshold=75,
+        avoid_score_threshold=35,
+        top_n=top_n,
+    )
+    snapshot_daily_artifact_v0(as_of=as_of_s, top_n_rows=25, picks_per_segment=3, force=False)
+
+    # 6) Optional backtest and draft generation.
+    if run_backtest:
+        start_s = (as_of_dt - timedelta(days=max(30, backtest_lookback_days))).date().isoformat()
+        end_s = as_of_dt.date().isoformat()
+        try:
+            backtest_snapshots_v0(
+                start_as_of=start_s,
+                end_as_of=end_s,
+                source_kinds="recommendations_v0,fresh_signals_v0",
+                baseline_ticker="SPY",
+                horizons="5,20",
+                top_n_per_action=5,
+                persist=True,
+            )
+        except Exception as e:
+            typer.echo(f"[pipeline] WARN backtest failed: {e}")
+
+    send_daily_subscriber_alerts_cli(as_of=as_of_s, limit_subscribers=0, send=False)
+
+    typer.echo(f"[pipeline] completed. form4_ingested={f4_ingested} sc13_ingested={sc13_ingested}")
+    pipeline_status_v0(lookback_days=7)
+
+
 @app.command("subscribe-email")
 def subscribe_email(
     email: str = typer.Option(..., help="Email address to subscribe (sends confirm email)"),

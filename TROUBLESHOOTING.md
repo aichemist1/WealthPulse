@@ -55,13 +55,12 @@ crontab -l
 ### One-command status verification (recommended)
 ```bash
 cd /opt/wealthpulse
-bash scripts/pipeline_status_compose.sh
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli pipeline-status-v0 --lookback-days 7
 ```
 
 This prints:
-- container status
 - ingestion/snapshot/artifact freshness summary
-- tail of `daily_pipeline.log`
+- latest alert draft status
 
 ### Recreate only web (Caddy + frontend)
 Use this after changing `Caddyfile` or frontend build behavior.
@@ -157,6 +156,18 @@ sudo docker compose --env-file prod.env exec backend python -m app.cli ingest-sc
 
 sudo docker compose --env-file prod.env exec backend python -m app.cli snapshot-fresh-signals-v0 --as-of 2025-11-15 --fresh-days 30 --insider-min-value 10000 --top-n 20
 sudo docker compose --env-file prod.env exec backend python -m app.cli snapshot-recommendations-v0 --as-of 2025-11-15 --fresh-days 7 --buy-score-threshold 70 --insider-min-value 100000 --top-n 20
+```
+
+### Top Picks / Dividend cards are missing
+Run the integrated backend pipeline command:
+```bash
+cd /opt/wealthpulse
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli run-daily-pipeline-v0 --sec-lookback-days 3 --sec-limit 200 --bootstrap-13f-if-missing --top-n 20
+```
+
+Then verify:
+```bash
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli pipeline-status-v0 --lookback-days 7
 ```
 
 ## Smoke test
