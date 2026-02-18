@@ -4,6 +4,7 @@ sqlmodel==0.0.22
 SQLAlchemy==2.0.38
 psycopg[binary]==3.2.6
 typer==0.15.1
+click==8.1.7
 pydantic-settings==2.7.1
 python-dateutil==2.9.0.post0
 pytest==8.3.4
