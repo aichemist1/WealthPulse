@@ -1502,6 +1502,93 @@ def backtest_snapshots_v0(
         )
 
 
+@app.command("pipeline-status-v0")
+def pipeline_status_v0(
+    lookback_days: int = typer.Option(7, help="Freshness window for ingest counts"),
+) -> None:
+    """
+    One-command operational status for daily pipeline verification.
+    """
+
+    now = datetime.utcnow()
+    window_start = now - timedelta(days=max(1, min(int(lookback_days), 90)))
+
+    with Session(engine) as session:
+        form4_cnt = len(
+            session.exec(
+                select(InsiderTx.id)
+                .where(InsiderTx.event_date != None)  # noqa: E711
+                .where(InsiderTx.event_date >= window_start)
+            ).all()
+        )
+        sc13_cnt = len(
+            session.exec(
+                select(LargeOwnerFiling.id)
+                .where(LargeOwnerFiling.filed_at != None)  # noqa: E711
+                .where(LargeOwnerFiling.filed_at >= window_start)
+            ).all()
+        )
+
+        latest_form4 = session.exec(
+            select(InsiderTx).where(InsiderTx.event_date != None).order_by(col(InsiderTx.event_date).desc())
+        ).first()
+        latest_sc13 = session.exec(
+            select(LargeOwnerFiling).where(LargeOwnerFiling.filed_at != None).order_by(col(LargeOwnerFiling.filed_at).desc())
+        ).first()
+
+        latest_fresh = session.exec(
+            select(SnapshotRun).where(col(SnapshotRun.kind) == "fresh_signals_v0").order_by(col(SnapshotRun.as_of).desc(), col(SnapshotRun.created_at).desc())
+        ).first()
+        latest_recs = session.exec(
+            select(SnapshotRun).where(col(SnapshotRun.kind) == "recommendations_v0").order_by(col(SnapshotRun.as_of).desc(), col(SnapshotRun.created_at).desc())
+        ).first()
+        latest_13f = session.exec(
+            select(SnapshotRun).where(col(SnapshotRun.kind) == "13f_whales").order_by(col(SnapshotRun.as_of).desc(), col(SnapshotRun.created_at).desc())
+        ).first()
+
+        latest_artifact = session.exec(
+            select(DailySnapshotArtifact)
+            .where(col(DailySnapshotArtifact.kind) == "daily_snapshot_v0")
+            .order_by(col(DailySnapshotArtifact.as_of).desc(), col(DailySnapshotArtifact.created_at).desc())
+        ).first()
+        latest_backtest = session.exec(
+            select(BacktestRun).where(col(BacktestRun.kind) == "backtest_v0").order_by(col(BacktestRun.completed_at).desc(), col(BacktestRun.started_at).desc())
+        ).first()
+        latest_alert = session.exec(select(AlertRun).order_by(col(AlertRun.created_at).desc())).first()
+
+    def fmt_dt(x: datetime | None) -> str:
+        return x.isoformat() if x else "n/a"
+
+    def age_hours(x: datetime | None) -> str:
+        if not x:
+            return "n/a"
+        return f"{(now - x).total_seconds() / 3600.0:.1f}h"
+
+    typer.echo("=== WealthPulse Pipeline Status (v0) ===")
+    typer.echo(f"now_utc: {now.isoformat()}")
+    typer.echo(f"lookback_days: {lookback_days}")
+    typer.echo("")
+    typer.echo("[ingestion]")
+    typer.echo(f"form4_count_window: {form4_cnt}")
+    typer.echo(f"sc13_count_window: {sc13_cnt}")
+    typer.echo(f"latest_form4_event_date: {fmt_dt(latest_form4.event_date if latest_form4 else None)} age={age_hours(latest_form4.event_date if latest_form4 else None)}")
+    typer.echo(f"latest_sc13_filed_at: {fmt_dt(latest_sc13.filed_at if latest_sc13 else None)} age={age_hours(latest_sc13.filed_at if latest_sc13 else None)}")
+    typer.echo("")
+    typer.echo("[snapshots]")
+    typer.echo(f"latest_13f_whales_as_of: {fmt_dt(latest_13f.as_of if latest_13f else None)}")
+    typer.echo(f"latest_fresh_signals_as_of: {fmt_dt(latest_fresh.as_of if latest_fresh else None)}")
+    typer.echo(f"latest_recommendations_as_of: {fmt_dt(latest_recs.as_of if latest_recs else None)}")
+    typer.echo("")
+    typer.echo("[artifacts]")
+    typer.echo(f"latest_daily_artifact_as_of: {fmt_dt(latest_artifact.as_of if latest_artifact else None)}")
+    typer.echo(f"latest_daily_artifact_hash: {(latest_artifact.artifact_hash[:12] if latest_artifact else 'n/a')}")
+    typer.echo(f"latest_backtest_completed_at: {fmt_dt(latest_backtest.completed_at if latest_backtest else None)}")
+    typer.echo("")
+    typer.echo("[alerts]")
+    typer.echo(f"latest_alert_run_created_at: {fmt_dt(latest_alert.created_at if latest_alert else None)}")
+    typer.echo(f"latest_alert_run_status: {(latest_alert.status if latest_alert else 'n/a')}")
+
+
 @app.command("subscribe-email")
 def subscribe_email(
     email: str = typer.Option(..., help="Email address to subscribe (sends confirm email)"),

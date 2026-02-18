@@ -52,6 +52,17 @@ bash scripts/install_daily_pipeline_cron.sh
 crontab -l
 ```
 
+### One-command status verification (recommended)
+```bash
+cd /opt/wealthpulse
+bash scripts/pipeline_status_compose.sh
+```
+
+This prints:
+- container status
+- ingestion/snapshot/artifact freshness summary
+- tail of `daily_pipeline.log`
+
 ### Recreate only web (Caddy + frontend)
 Use this after changing `Caddyfile` or frontend build behavior.
 ```bash

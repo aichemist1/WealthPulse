@@ -237,6 +237,12 @@ cd /opt/wealthpulse
 bash scripts/pipeline_daily_compose.sh
 ```
 
+Verify quickly:
+```bash
+cd /opt/wealthpulse
+bash scripts/pipeline_status_compose.sh
+```
+
 Optional env knobs (set in shell or cron environment):
 - `WEALTHPULSE_PIPELINE_FORM4_LIMIT` (default `200`)
 - `WEALTHPULSE_PIPELINE_SC13_LIMIT` (default `200`)

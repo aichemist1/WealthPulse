@@ -254,5 +254,8 @@ Record decisions here so we can resume without re-deriving context.
 - Added cron installer helper:
   - `scripts/install_daily_pipeline_cron.sh`
   - default schedule: weekdays `13:35 UTC`.
+- Added one-command verification helper:
+  - `scripts/pipeline_status_compose.sh`
+  - prints container status + ingestion/snapshot/artifact freshness + recent pipeline logs.
 - Delivery remains manual-only:
   - pipeline generates subscriber draft run; admin still sends from dashboard.
