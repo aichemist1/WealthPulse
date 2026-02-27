@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.models import SnapshotRecommendation, SnapshotRun
+from app.models import CongressTrade, PriceBar, SnapshotRecommendation, SnapshotRun
 from app.snapshot.segments_v0 import compute_segments_v0
 
 
@@ -74,3 +74,48 @@ def test_segments_primary_selection_uses_institutional_when_strongest() -> None:
         institutional = next(s for s in out["segments"] if s["key"] == "institutional")
         tickers = {p["ticker"] for p in institutional["picks"]}
         assert "AAPL" in tickers
+
+
+def test_segments_includes_congressional_trading_theme() -> None:
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        now = datetime.utcnow()
+        fresh = _mk_run(session, kind="fresh_signals_v0")
+        session.add(
+            SnapshotRecommendation(
+                run_id=fresh.id,
+                ticker="PLD",
+                segment="Fresh Whale Signals (SC13 + Insider + Trend)",
+                action="watch",
+                direction="bullish",
+                score=7,
+                confidence=0.45,
+                reasons={"trend_flags": {"bullish_recent": True, "bearish_recent": False}},
+            )
+        )
+        session.add(
+            CongressTrade(
+                source="fmp",
+                source_id="house-1",
+                chamber="house",
+                politician="S. Capito",
+                ticker="PLD",
+                tx_type="purchase",
+                amount_range="$50k - $100k",
+                trade_date=now,
+                filing_date=now,
+            )
+        )
+        d0 = now.date().isoformat()
+        d1 = (now - timedelta(days=1)).date().isoformat()
+        session.add(PriceBar(ticker="PLD", date=d1, close=100.0, source="stooq"))
+        session.add(PriceBar(ticker="PLD", date=d0, close=112.0, source="stooq"))
+        session.commit()
+
+        out = compute_segments_v0(session=session, picks_per_segment=2)
+        congress = next(s for s in out["segments"] if s["key"] == "congress")
+        assert congress["name"] == "Congressional Trading"
+        tickers = {p["ticker"] for p in congress["picks"]}
+        assert "PLD" in tickers

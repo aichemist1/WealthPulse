@@ -30,6 +30,8 @@ from app.models import (
     SocialSignal,
     DailySnapshotArtifact,
     BacktestRun,
+    CongressTrade,
+    PriceBar,
 )
 from app.settings import settings
 from app.snapshot.watchlists import compute_watchlist, parse_ticker_csv
@@ -482,6 +484,97 @@ def watchlist_dividends(session: Session = Depends(get_session)) -> dict:
             }
         )
     return {"as_of": as_of, "rows": enriched}
+
+
+@app.get("/admin/congress/latest")
+def latest_congress_trades(days: int = 120, limit: int = 50, session: Session = Depends(get_session)) -> dict:
+    lookback_days = max(1, min(int(days or 120), 730))
+    lim = max(1, min(int(limit or 50), 200))
+    since = datetime.utcnow() - timedelta(days=lookback_days)
+
+    rows = list(
+        session.exec(
+            select(CongressTrade)
+            .where((CongressTrade.filing_date != None) | (CongressTrade.trade_date != None))  # noqa: E711
+            .where(
+                (CongressTrade.filing_date >= since)  # noqa: E711
+                | (CongressTrade.trade_date >= since)  # noqa: E711
+            )
+            .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.trade_date).desc(), col(CongressTrade.detected_at).desc())
+            .limit(lim)
+        ).all()
+    )
+
+    tickers = sorted({r.ticker for r in rows if r.ticker})
+    prices_by_ticker: dict[str, list[tuple[str, float]]] = {}
+    if tickers:
+        p = list(
+            session.exec(
+                select(PriceBar.ticker, PriceBar.date, PriceBar.close)
+                .where(col(PriceBar.ticker).in_(tickers), PriceBar.source == "stooq")
+                .order_by(col(PriceBar.ticker), col(PriceBar.date))
+            ).all()
+        )
+        for t, d, c in p:
+            prices_by_ticker.setdefault(str(t), []).append((str(d), float(c)))
+
+    def perf_since_filing(ticker: str, filing_date):
+        if not filing_date:
+            return None
+        bars = prices_by_ticker.get(ticker, [])
+        if not bars:
+            return None
+        filing_day = filing_date.date().isoformat()
+        entry = None
+        latest = bars[-1][1] if bars else None
+        for d, c in bars:
+            if d >= filing_day:
+                entry = c
+                break
+        if entry is None or latest is None or entry <= 0:
+            return None
+        return (latest / entry) - 1.0
+
+    out_rows: list[dict] = []
+    for r in rows:
+        out_rows.append(
+            {
+                "politician": r.politician,
+                "ticker": r.ticker,
+                "trade_date": r.trade_date.isoformat() if r.trade_date else None,
+                "filing_date": r.filing_date.isoformat() if r.filing_date else None,
+                "amount_range": r.amount_range,
+                "chamber": r.chamber,
+                "tx_type": r.tx_type,
+                "performance_since_filing": perf_since_filing(r.ticker, r.filing_date),
+                "source": r.source,
+                "source_id": r.source_id,
+            }
+        )
+
+    leaderboard: list[dict] = []
+    by_pol: dict[str, list[float]] = {}
+    for rr in out_rows:
+        p = rr.get("performance_since_filing")
+        if not isinstance(p, float):
+            continue
+        by_pol.setdefault(str(rr.get("politician") or "Unknown"), []).append(float(p))
+    for pol, vals in by_pol.items():
+        leaderboard.append(
+            {
+                "politician": pol,
+                "trades_count": len(vals),
+                "avg_performance_since_filing": (sum(vals) / len(vals)) if vals else None,
+            }
+        )
+    leaderboard = sorted(leaderboard, key=lambda x: float(x.get("avg_performance_since_filing") or -9e9), reverse=True)[:10]
+
+    return {
+        "as_of": datetime.utcnow().isoformat(),
+        "days": lookback_days,
+        "rows": out_rows,
+        "leaderboard": leaderboard,
+    }
 
 
 @app.get("/admin/alerts/latest")

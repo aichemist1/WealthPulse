@@ -259,3 +259,14 @@ Record decisions here so we can resume without re-deriving context.
   - prints ingestion/snapshot/artifact freshness + draft status.
 - Delivery remains manual-only:
   - pipeline generates subscriber draft run; admin still sends from dashboard.
+
+## 2026-02-18 — Congressional Trading widget (v0)
+- Added normalized congressional trade model (`congress_trades`) and FMP connector/ingest command:
+  - `python -m app.cli ingest-congress-fmp`
+- Added backend endpoint:
+  - `GET /admin/congress/latest`
+  - returns recent disclosure rows + politician leaderboard with computed `performance_since_filing` from local price bars.
+- Added dashboard widget:
+  - “Politician Leaderboard” card in Latest tab.
+- Integrated into daily backend pipeline:
+  - `run-daily-pipeline-v0` now attempts congressional ingest and includes disclosed tickers in price refresh for performance calculation.

@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from sqlmodel import col
 
 from app.connectors.form4 import parse_form4_xml
+from app.connectors.fmp_congress import FmpCongressClient, FmpCongressError, parse_fmp_disclosures
 from app.connectors.openfigi import default_openfigi_client, pick_best_equity_mapping
 from app.connectors.sec_edgar import default_sec_client
 from app.connectors.sp500_constituents import parse_sp500_constituents_csv
@@ -32,6 +33,7 @@ from app.models import Subscriber
 from app.models import AlertDelivery, AlertRun
 from app.models import DailySnapshotArtifact
 from app.models import BacktestRun
+from app.models import CongressTrade
 from app.snapshot.insider_whales import compute_insider_whales, window_start
 from app.security_map import parse_security_map_csv
 from app.snapshot.thirteenf_whales import HoldingValueRow, compute_13f_whales, previous_quarter_end
@@ -513,6 +515,91 @@ def ingest_social_reddit(
         f"rows_seen={rows_seen} inserted={inserted} updated={updated} dry_run={dry_run}"
     )
     typer.echo(f"Top mentions: {top_txt}")
+
+
+@app.command("ingest-congress-fmp")
+def ingest_congress_fmp(
+    limit: int = typer.Option(200, help="Max rows per chamber request"),
+    include_house: bool = typer.Option(True, help="Fetch House disclosures"),
+    include_senate: bool = typer.Option(True, help="Fetch Senate disclosures"),
+    source: str = typer.Option("fmp", help="Source label"),
+) -> None:
+    """
+    Ingest congressional disclosures from Financial Modeling Prep (House/Senate).
+    Requires WEALTHPULSE_FMP_API_KEY.
+    """
+
+    api_key = (settings.fmp_api_key or "").strip()
+    if not api_key:
+        raise typer.BadParameter("WEALTHPULSE_FMP_API_KEY is required for ingest-congress-fmp")
+
+    client = FmpCongressClient(api_key=api_key)
+    rows: list = []
+    if include_house:
+        try:
+            rows.extend(parse_fmp_disclosures(client.fetch_house(limit=limit), chamber="house"))
+        except FmpCongressError as e:
+            typer.echo(f"WARN: {e}")
+    if include_senate:
+        try:
+            rows.extend(parse_fmp_disclosures(client.fetch_senate(limit=limit), chamber="senate"))
+        except FmpCongressError as e:
+            typer.echo(f"WARN: {e}")
+
+    inserted = 0
+    updated = 0
+    with Session(engine) as session:
+        for r in rows:
+            existing = session.exec(
+                select(CongressTrade).where(
+                    col(CongressTrade.source) == source.strip(),
+                    col(CongressTrade.source_id) == r.source_id,
+                )
+            ).first()
+            if existing is None:
+                session.add(
+                    CongressTrade(
+                        source=source.strip(),
+                        source_id=r.source_id,
+                        chamber=r.chamber,
+                        politician=r.politician,
+                        ticker=r.ticker,
+                        asset_description=r.asset_description,
+                        tx_type=r.tx_type,
+                        amount_range=r.amount_range,
+                        trade_date=r.trade_date,
+                        filing_date=r.filing_date,
+                        reported_at=r.reported_at,
+                        raw=r.raw,
+                    )
+                )
+                inserted += 1
+            else:
+                changed = False
+                for k, v in {
+                    "chamber": r.chamber,
+                    "politician": r.politician,
+                    "ticker": r.ticker,
+                    "asset_description": r.asset_description,
+                    "tx_type": r.tx_type,
+                    "amount_range": r.amount_range,
+                    "trade_date": r.trade_date,
+                    "filing_date": r.filing_date,
+                    "reported_at": r.reported_at,
+                    "raw": r.raw,
+                }.items():
+                    if getattr(existing, k) != v:
+                        setattr(existing, k, v)
+                        changed = True
+                if changed:
+                    session.add(existing)
+                    updated += 1
+        session.commit()
+
+    typer.echo(
+        f"Congress FMP: rows_fetched={len(rows)} inserted={inserted} updated={updated} "
+        f"house={include_house} senate={include_senate}"
+    )
 
 
 @app.command("ingest-dividend-metrics-yahoo")
@@ -1528,12 +1615,27 @@ def pipeline_status_v0(
                 .where(LargeOwnerFiling.filed_at >= window_start)
             ).all()
         )
+        congress_cnt = len(
+            session.exec(
+                select(CongressTrade.id)
+                .where((CongressTrade.filing_date != None) | (CongressTrade.trade_date != None))  # noqa: E711
+                .where(
+                    (CongressTrade.filing_date >= window_start)  # noqa: E711
+                    | (CongressTrade.trade_date >= window_start)  # noqa: E711
+                )
+            ).all()
+        )
 
         latest_form4 = session.exec(
             select(InsiderTx).where(InsiderTx.event_date != None).order_by(col(InsiderTx.event_date).desc())
         ).first()
         latest_sc13 = session.exec(
             select(LargeOwnerFiling).where(LargeOwnerFiling.filed_at != None).order_by(col(LargeOwnerFiling.filed_at).desc())
+        ).first()
+        latest_congress = session.exec(
+            select(CongressTrade)
+            .where((CongressTrade.filing_date != None) | (CongressTrade.trade_date != None))  # noqa: E711
+            .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.trade_date).desc())
         ).first()
 
         latest_fresh = session.exec(
@@ -1571,8 +1673,10 @@ def pipeline_status_v0(
     typer.echo("[ingestion]")
     typer.echo(f"form4_count_window: {form4_cnt}")
     typer.echo(f"sc13_count_window: {sc13_cnt}")
+    typer.echo(f"congress_count_window: {congress_cnt}")
     typer.echo(f"latest_form4_event_date: {fmt_dt(latest_form4.event_date if latest_form4 else None)} age={age_hours(latest_form4.event_date if latest_form4 else None)}")
     typer.echo(f"latest_sc13_filed_at: {fmt_dt(latest_sc13.filed_at if latest_sc13 else None)} age={age_hours(latest_sc13.filed_at if latest_sc13 else None)}")
+    typer.echo(f"latest_congress_filing_date: {fmt_dt(latest_congress.filing_date if latest_congress else None)}")
     typer.echo("")
     typer.echo("[snapshots]")
     typer.echo(f"latest_13f_whales_as_of: {fmt_dt(latest_13f.as_of if latest_13f else None)}")
@@ -1596,6 +1700,7 @@ def run_daily_pipeline_v0(
     sec_limit: int = typer.Option(200, help="Per-day SEC ingest filing limit (Form4/SC13)"),
     bootstrap_13f_if_missing: bool = typer.Option(True, help="If no 13F snapshot exists, bootstrap 13F ingest+mapping"),
     top_n: int = typer.Option(20, help="Top rows per snapshot"),
+    run_congress_ingest: bool = typer.Option(True, help="Run congressional disclosures ingest (FMP)"),
     run_reddit_ingest: bool = typer.Option(False, help="Run Reddit social ingest step"),
     run_backtest: bool = typer.Option(True, help="Run backtest step"),
     backtest_lookback_days: int = typer.Option(120, help="Backtest historical window days"),
@@ -1646,9 +1751,27 @@ def run_daily_pipeline_v0(
             ingest_social_reddit(lookback_hours=24, dry_run=False)
         except Exception as e:
             typer.echo(f"[pipeline] WARN reddit ingest failed: {e}")
+    if run_congress_ingest:
+        try:
+            ingest_congress_fmp(limit=200, include_house=True, include_senate=True, source="fmp")
+        except Exception as e:
+            typer.echo(f"[pipeline] WARN congress ingest failed: {e}")
 
     # 3) Ensure watchlist prices and dividend fundamentals refresh.
-    watch_tickers = parse_ticker_csv(settings.watchlist_etfs) + parse_ticker_csv(settings.watchlist_dividend_stocks)
+    watch_tickers = (
+        parse_ticker_csv(settings.watchlist_etfs)
+        + parse_ticker_csv(settings.watchlist_dividend_stocks)
+        + parse_ticker_csv(settings.watchlist_congress_tickers)
+    )
+    # Add latest disclosed congressional tickers for performance-since-filing metric support.
+    with Session(engine) as session:
+        recent_congress_tickers = session.exec(
+            select(CongressTrade.ticker)
+            .where(CongressTrade.ticker != "")
+            .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.detected_at).desc())
+            .limit(50)
+        ).all()
+    watch_tickers.extend([str(t).upper() for t in recent_congress_tickers if t])
     watch_tickers = list(dict.fromkeys([*watch_tickers, "SPY"]))
     if watch_tickers:
         try:

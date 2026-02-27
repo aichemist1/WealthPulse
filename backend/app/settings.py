@@ -19,10 +19,12 @@ class Settings(BaseSettings):
     # Optional: OpenFIGI enrichment (CUSIP -> ticker)
     openfigi_api_key: str = ""
     openfigi_rps: float = 2.0
+    fmp_api_key: str = ""
 
     # Dashboard watchlists (comma-delimited tickers)
     watchlist_etfs: str = "GLD,AIQ,QTUM,SKYY,MAGS,JTEK,ARKW,CHAT,HACK"
     watchlist_dividend_stocks: str = "VNOM,SLB,EOG"
+    watchlist_congress_tickers: str = "PLD"
 
     # Optional social listener (v0.1, feature-flagged)
     social_enabled: bool = False

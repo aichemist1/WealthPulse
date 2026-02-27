@@ -603,3 +603,35 @@ class BacktestRun(SQLModel, table=True):
         Index("ix_backtest_run_kind_started", "kind", "started_at"),
         Index("ix_backtest_run_completed", "completed_at"),
     )
+
+
+class CongressTrade(SQLModel, table=True):
+    """
+    Normalized congressional trading disclosures (House/Senate).
+    """
+
+    __tablename__ = "congress_trades"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    source: str = Field(default="fmp", index=True)
+    source_id: str = Field(index=True)
+
+    chamber: Optional[str] = Field(default=None, index=True)  # house|senate
+    politician: str = Field(index=True)
+    ticker: str = Field(index=True)
+    asset_description: Optional[str] = None
+    tx_type: Optional[str] = Field(default=None, index=True)  # purchase|sale
+    amount_range: Optional[str] = Field(default=None, index=True)
+
+    trade_date: Optional[datetime] = Field(default=None, index=True)
+    filing_date: Optional[datetime] = Field(default=None, index=True)
+    reported_at: Optional[datetime] = Field(default=None, index=True)
+
+    detected_at: datetime = Field(default_factory=utcnow, index=True)
+    raw: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    __table_args__ = (
+        UniqueConstraint("source", "source_id", name="uq_congress_trade_source_source_id"),
+        Index("ix_congress_trade_ticker_filing_date", "ticker", "filing_date"),
+        Index("ix_congress_trade_politician_filing_date", "politician", "filing_date"),
+    )

@@ -181,6 +181,28 @@ export type LatestBacktestRun = {
   };
 };
 
+export type LatestCongressTrades = {
+  as_of: string;
+  days: number;
+  rows: Array<{
+    politician: string;
+    ticker: string;
+    trade_date: string | null;
+    filing_date: string | null;
+    amount_range: string | null;
+    chamber: string | null;
+    tx_type: string | null;
+    performance_since_filing: number | null;
+    source: string;
+    source_id: string;
+  }>;
+  leaderboard: Array<{
+    politician: string;
+    trades_count: number;
+    avg_performance_since_filing: number | null;
+  }>;
+};
+
 export const api = {
   authStatus: () => apiGet<{ enabled: boolean; ttl_hours: number }>("/admin/auth/status"),
   adminLogin: (password: string) =>
@@ -198,6 +220,8 @@ export const api = {
   socialCoverage: (hours: number = 24, topN: number = 10) =>
     apiGet<SocialCoverage>(`/admin/social/coverage?hours=${encodeURIComponent(String(hours))}&top_n=${encodeURIComponent(String(topN))}`),
   latestBacktestRun: () => apiGet<LatestBacktestRun>("/admin/backtests/latest"),
+  latestCongressTrades: (days: number = 120, limit: number = 50) =>
+    apiGet<LatestCongressTrades>(`/admin/congress/latest?days=${encodeURIComponent(String(days))}&limit=${encodeURIComponent(String(limit))}`),
   latest13FWhales: () => apiGet<Latest13FWhales>("/admin/snapshots/13f-whales/latest"),
   latestInsiderWhales: () => apiGet<LatestInsiderWhales>("/admin/snapshots/insider-whales/latest"),
   latestRecommendations: () =>

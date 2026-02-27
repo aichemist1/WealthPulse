@@ -6,6 +6,7 @@ import {
   type AdminMetrics,
   type Latest13FWhales,
   type LatestBacktestRun,
+  type LatestCongressTrades,
   type LatestInsiderWhales,
   type LatestSegments,
   type SocialCoverage,
@@ -38,6 +39,7 @@ export function App() {
   const [metrics, setMetrics] = useState<LoadState<AdminMetrics>>({ status: "idle" });
   const [socialCoverage, setSocialCoverage] = useState<LoadState<SocialCoverage>>({ status: "idle" });
   const [backtest, setBacktest] = useState<LoadState<LatestBacktestRun>>({ status: "idle" });
+  const [congress, setCongress] = useState<LoadState<LatestCongressTrades>>({ status: "idle" });
   const [whales13f, setWhales13f] = useState<LoadState<Latest13FWhales>>({ status: "idle" });
   const [whalesInsider, setWhalesInsider] = useState<LoadState<LatestInsiderWhales>>({ status: "idle" });
   const [recs, setRecs] = useState<
@@ -153,6 +155,68 @@ export function App() {
     const rows = fresh.data?.rows ?? [];
     return rows.filter((r) => r.action === "avoid");
   }, [fresh.data]);
+  const congressRowsByTicker = useMemo(() => {
+    const rows = congress.data?.rows ?? [];
+    const out = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const ticker = String(row.ticker || "").toUpperCase();
+      if (!ticker) continue;
+      const existing = out.get(ticker) ?? [];
+      existing.push(row);
+      out.set(ticker, existing);
+    }
+    return out;
+  }, [congress.data]);
+
+  const openThemePick = (segmentKey: string, p: { ticker: string; score: number; action: string; confidence: number; source_kind: string }) => {
+    const sourceRows = p.source_kind === "recommendations_v0" ? recs.data?.rows ?? [] : fresh.data?.rows ?? [];
+    const found = sourceRows.find((r) => r.ticker === p.ticker);
+    if (found) {
+      setSelectedRec({
+        ticker: found.ticker,
+        score: found.score,
+        action: found.action,
+        direction: found.direction,
+        confidence: found.confidence,
+        reasons: found.reasons,
+        segment: found.segment,
+      });
+      return;
+    }
+
+    if (segmentKey !== "congress") return;
+    const trades = congressRowsByTicker.get(String(p.ticker).toUpperCase()) ?? [];
+    if (!trades.length) return;
+    const buys = trades.filter((x) => String(x.tx_type || "").toLowerCase().includes("buy") || String(x.tx_type || "").toLowerCase().includes("purch")).length;
+    const sells = trades.filter((x) => String(x.tx_type || "").toLowerCase().includes("sell")).length;
+    const perfRows = trades.filter((x) => typeof x.performance_since_filing === "number");
+    const avgPerf = perfRows.length
+      ? perfRows.reduce((acc, row) => acc + Number(row.performance_since_filing ?? 0), 0) / perfRows.length
+      : null;
+    const latestFiling = trades
+      .map((x) => x.filing_date || x.trade_date || "")
+      .filter((x) => x)
+      .sort()
+      .slice(-1)[0] || null;
+
+    setSelectedRec({
+      ticker: p.ticker,
+      score: p.score,
+      action: p.action,
+      direction: buys >= sells ? "bullish" : "bearish",
+      confidence: p.confidence,
+      segment: "Congressional Trading",
+      reasons: {
+        congress: {
+          trades_count: trades.length,
+          buy_count: buys,
+          sell_count: sells,
+          avg_performance_since_filing: avgPerf,
+          latest_filing_date: latestFiling,
+        },
+      },
+    });
+  };
 
   useEffect(() => {
     setAuthStatus({ status: "loading" });
@@ -219,6 +283,11 @@ export function App() {
     api.watchlistDividends()
       .then((data) => setDivs({ status: "ok", data }))
       .catch((e) => setDivs({ status: "error", error: String(e) }));
+
+    setCongress({ status: "loading" });
+    api.latestCongressTrades(120, 50)
+      .then((data) => setCongress({ status: "ok", data }))
+      .catch((e) => setCongress({ status: "error", error: String(e) }));
 
     setSubscriberDraft({ status: "loading" });
     api.latestSubscriberAlertDraft()
@@ -464,21 +533,7 @@ export function App() {
                         <button
                           key={`${s.key}-${p.ticker}`}
                           className="themePick"
-                          onClick={() => {
-                            const sourceRows =
-                              p.source_kind === "recommendations_v0" ? recs.data?.rows ?? [] : fresh.data?.rows ?? [];
-                            const found = sourceRows.find((r) => r.ticker === p.ticker);
-                            if (!found) return;
-                            setSelectedRec({
-                              ticker: found.ticker,
-                              score: found.score,
-                              action: found.action,
-                              direction: found.direction,
-                              confidence: found.confidence,
-                              reasons: found.reasons,
-                              segment: found.segment,
-                            });
-                          }}
+                          onClick={() => openThemePick(s.key, p)}
                         >
                           <div className="themePickTop">
                             <span className="mono">{p.ticker}</span>
@@ -707,6 +762,69 @@ export function App() {
                         <td className="num">{r.return_60d == null ? "n/a" : `${(r.return_60d * 100).toFixed(1)}%`}</td>
                         <td className="muted">{r.bullish_recent ? "bull" : r.bearish_recent ? "bear" : "n/a"}</td>
                         <td className="num">{r.volume_ratio == null ? "n/a" : `${r.volume_ratio.toFixed(2)}x`}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </div>
+
+          <div className="card span2">
+            <div className="cardTitle">Politician Leaderboard</div>
+            <div className="muted">Congressional trading disclosures (House/Senate; delayed filings).</div>
+            {congress.status === "loading" && <div className="muted">Loading…</div>}
+            {congress.status === "error" && <div className="error">{congress.error}</div>}
+            {congress.status === "ok" && congress.data && (
+              <>
+                <div className="muted">as_of: {congress.data.as_of.replace("T", " ").slice(0, 19)} · window: {congress.data.days}d</div>
+                <table className="table" style={{ marginTop: 8 }}>
+                  <thead>
+                    <tr>
+                      <th>Politician</th>
+                      <th className="num">Trades</th>
+                      <th className="num">Avg Perf</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(congress.data.leaderboard || []).slice(0, 8).map((r) => (
+                      <tr key={r.politician}>
+                        <td>{r.politician}</td>
+                        <td className="num">{r.trades_count}</td>
+                        <td className="num">
+                          {r.avg_performance_since_filing == null ? "n/a" : `${(Number(r.avg_performance_since_filing) * 100).toFixed(1)}%`}
+                        </td>
+                      </tr>
+                    ))}
+                    {(congress.data.leaderboard || []).length === 0 && (
+                      <tr>
+                        <td colSpan={3} className="muted">No congressional rows yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+                <table className="table" style={{ marginTop: 8 }}>
+                  <thead>
+                    <tr>
+                      <th>Politician</th>
+                      <th>Ticker</th>
+                      <th>Trade Date</th>
+                      <th>Filing Date</th>
+                      <th>Amount</th>
+                      <th className="num">Perf Since Filing</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(congress.data.rows || []).slice(0, 10).map((r) => (
+                      <tr key={`${r.source}:${r.source_id}`}>
+                        <td>{r.politician}</td>
+                        <td>{r.ticker}</td>
+                        <td className="muted">{r.trade_date ? r.trade_date.slice(0, 10) : "n/a"}</td>
+                        <td className="muted">{r.filing_date ? r.filing_date.slice(0, 10) : "n/a"}</td>
+                        <td>{r.amount_range || "n/a"}</td>
+                        <td className="num">
+                          {r.performance_since_filing == null ? "n/a" : `${(Number(r.performance_since_filing) * 100).toFixed(1)}%`}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1502,6 +1620,35 @@ export function App() {
               <div className="kvKey">Confidence</div>
               <div className="kvVal">{(selectedRec.confidence * 100).toFixed(0)}%</div>
             </div>
+            {(selectedRec.reasons as any)?.congress ? (
+              <>
+                <div style={{ marginTop: 10 }} className="muted">
+                  Congressional activity
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Trades (window)</div>
+                  <div className="kvVal">{Number((selectedRec.reasons as any)?.congress?.trades_count ?? 0)}</div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Buy / Sell count</div>
+                  <div className="kvVal">
+                    {Number((selectedRec.reasons as any)?.congress?.buy_count ?? 0)} / {Number((selectedRec.reasons as any)?.congress?.sell_count ?? 0)}
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Avg perf since filing</div>
+                  <div className="kvVal">
+                    {(selectedRec.reasons as any)?.congress?.avg_performance_since_filing == null
+                      ? "n/a"
+                      : `${(Number((selectedRec.reasons as any)?.congress?.avg_performance_since_filing ?? 0) * 100).toFixed(1)}%`}
+                  </div>
+                </div>
+                <div className="kvRow">
+                  <div className="kvKey">Latest filing</div>
+                  <div className="kvVal">{String((selectedRec.reasons as any)?.congress?.latest_filing_date ?? "n/a").slice(0, 10)}</div>
+                </div>
+              </>
+            ) : null}
             {(selectedRec.reasons as any)?.divergence ? (
               <>
                 <div style={{ marginTop: 10 }} className="muted">

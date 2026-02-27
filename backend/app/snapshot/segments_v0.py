@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlmodel import Session, select
 from sqlmodel import col
 
-from app.models import SnapshotRecommendation, SnapshotRun
+from app.models import CongressTrade, PriceBar, SnapshotRecommendation, SnapshotRun
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,21 @@ def _to_int(x: Any, default: int = 0) -> int:
         return default
 
 
+def _perf_since_date(*, bars: list[tuple[str, float]], start_date: Optional[datetime]) -> Optional[float]:
+    if not start_date or not bars:
+        return None
+    start_day = start_date.date().isoformat()
+    entry: Optional[float] = None
+    latest = bars[-1][1] if bars else None
+    for d, c in bars:
+        if d >= start_day:
+            entry = c
+            break
+    if entry is None or latest is None or entry <= 0:
+        return None
+    return (latest / entry) - 1.0
+
+
 def _choose_primary_segment(cands: list[SegmentCandidate]) -> Optional[SegmentCandidate]:
     """
     Primary segment selection by eligibility strength (not static bucket priority).
@@ -145,13 +161,45 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
     SEGMENT_PRIORITY = {
         "insider": 1,
         "activist": 2,
-        "institutional": 3,
-        "momentum": 4,
-        "risk": 5,
+        "congress": 3,
+        "institutional": 4,
+        "momentum": 5,
+        "risk": 6,
     }
 
     segment_picks: dict[str, list[SegmentCandidate]] = {k: [] for k in SEGMENT_PRIORITY.keys()}
     assignment: dict[str, str] = {}
+
+    # Congress disclosures for tickers already present in recommendation universes.
+    congress_by_ticker: dict[str, list[CongressTrade]] = {}
+    congress_latest_dt: Optional[datetime] = None
+    prices_by_ticker: dict[str, list[tuple[str, float]]] = {}
+    if all_tickers:
+        lookback_start = datetime.utcnow() - timedelta(days=365)
+        congress_rows = list(
+            session.exec(
+                select(CongressTrade)
+                .where(col(CongressTrade.ticker).in_(all_tickers))
+                .where((CongressTrade.filing_date >= lookback_start) | (CongressTrade.trade_date >= lookback_start))  # noqa: E711
+                .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.trade_date).desc(), col(CongressTrade.detected_at).desc())
+            ).all()
+        )
+        for row in congress_rows:
+            congress_by_ticker.setdefault(row.ticker, []).append(row)
+            row_dt = row.filing_date or row.trade_date
+            if row_dt and (congress_latest_dt is None or row_dt > congress_latest_dt):
+                congress_latest_dt = row_dt
+
+        if congress_by_ticker:
+            price_rows = list(
+                session.exec(
+                    select(PriceBar.ticker, PriceBar.date, PriceBar.close)
+                    .where(col(PriceBar.ticker).in_(list(congress_by_ticker.keys())), PriceBar.source == "stooq")
+                    .order_by(col(PriceBar.ticker), col(PriceBar.date))
+                ).all()
+            )
+            for ticker, day, close in price_rows:
+                prices_by_ticker.setdefault(str(ticker), []).append((str(day), float(close)))
 
     for ticker in all_tickers:
         fresh = fresh_by_ticker.get(ticker)
@@ -183,6 +231,7 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
         trend_recent_top = bool(_safe_get(rec_reasons, "corroborators", "trend_bullish_recent") or False)
         trend_adj = _to_int(_safe_get(rec_reasons, "trend_adjustment"), 0)
         divergence_type = str(_safe_get(fresh_reasons, "divergence", "type") or "")
+        congress_rows = congress_by_ticker.get(ticker, [])
 
         cands: list[SegmentCandidate] = []
 
@@ -236,6 +285,51 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
                         confidence=rec_conf,
                         why=f"13F Δ ${_fmt_millions(delta)} · mgrs {inc}/{total} · trend {trend_adj:+d}",
                         source_kind="recommendations_v0",
+                    ),
+                )
+            )
+
+        if congress_rows:
+            buys = 0
+            sells = 0
+            latest_filing: Optional[datetime] = None
+            perfs: list[float] = []
+            bars = prices_by_ticker.get(ticker, [])
+            for trade in congress_rows:
+                tt = (trade.tx_type or "").lower()
+                if "buy" in tt or "purch" in tt:
+                    buys += 1
+                if "sell" in tt:
+                    sells += 1
+                t_dt = trade.filing_date or trade.trade_date
+                if t_dt and (latest_filing is None or t_dt > latest_filing):
+                    latest_filing = t_dt
+                perf = _perf_since_date(bars=bars, start_date=trade.filing_date)
+                if isinstance(perf, float):
+                    perfs.append(perf)
+
+            count = len(congress_rows)
+            avg_perf = (sum(perfs) / len(perfs)) if perfs else 0.0
+            perf_bonus = max(-4.0, min(4.0, avg_perf * 20.0))
+            flow_bonus = 2.0 if buys > sells else (-1.0 if sells > buys else 0.0)
+            base_score = max(fresh_score, rec_score)
+            base_conf = max(fresh_conf, rec_conf)
+            source_kind = "fresh_signals_v0" if fresh is not None else "recommendations_v0"
+            source_action = (fresh.action if fresh else (recs.action if recs else "watch"))
+
+            strength = float(base_score) + min(8.0, 1.5 * float(count)) + flow_bonus + perf_bonus
+            cands.append(
+                SegmentCandidate(
+                    key="congress",
+                    priority=SEGMENT_PRIORITY["congress"],
+                    strength=strength,
+                    pick=SegmentPick(
+                        ticker=ticker,
+                        score=base_score,
+                        action=source_action,
+                        confidence=base_conf,
+                        why=f"Congress {buys}B/{sells}S · filings {count} · perf {avg_perf * 100:+.1f}%",
+                        source_kind=source_kind,
                     ),
                 )
             )
@@ -300,6 +394,7 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
 
     insider_cands = _sort(segment_picks["insider"])
     activist_cands = _sort(segment_picks["activist"])
+    congress_cands = _sort(segment_picks["congress"])
     inst_cands = _sort(segment_picks["institutional"])
     momentum_cands = _sort(segment_picks["momentum"])
     risk_cands = _sort(segment_picks["risk"])
@@ -329,6 +424,12 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
                 "Activist / Large Owner",
                 fresh_run.as_of.isoformat() if fresh_run else None,
                 activist_cands,
+            ),
+            _bucket(
+                "congress",
+                "Congressional Trading",
+                congress_latest_dt.isoformat() if congress_latest_dt else None,
+                congress_cands,
             ),
             _bucket(
                 "institutional",

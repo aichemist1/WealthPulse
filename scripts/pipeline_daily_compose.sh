@@ -17,6 +17,7 @@ RUN_BACKTEST="${WEALTHPULSE_PIPELINE_RUN_BACKTEST:-true}"
 BACKTEST_LOOKBACK_DAYS="${WEALTHPULSE_PIPELINE_BACKTEST_LOOKBACK_DAYS:-120}"
 
 RUN_REDDIT_INGEST="${WEALTHPULSE_PIPELINE_RUN_REDDIT_INGEST:-false}"
+RUN_CONGRESS_INGEST="${WEALTHPULSE_PIPELINE_RUN_CONGRESS_INGEST:-true}"
 
 LOG_DIR="${WEALTHPULSE_PIPELINE_LOG_DIR:-/var/log/wealthpulse}"
 mkdir -p "${LOG_DIR}"
@@ -75,6 +76,11 @@ if [[ "${RUN_REDDIT_INGEST}" == "true" ]]; then
   args+=(--run-reddit-ingest)
 else
   args+=(--no-run-reddit-ingest)
+fi
+if [[ "${RUN_CONGRESS_INGEST}" == "true" ]]; then
+  args+=(--run-congress-ingest)
+else
+  args+=(--no-run-congress-ingest)
 fi
 if [[ "${RUN_BACKTEST}" == "true" ]]; then
   args+=(--run-backtest)

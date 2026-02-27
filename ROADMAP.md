@@ -45,6 +45,7 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [x] Dashboard: top picks + insider feed (+ drill-down drawer)
 - [x] Dashboard: ETF / Macro Plays card (seed: GLD, AIQ, QTUM, SKYY, MAGS, JTEK, ARKW, CHAT, HACK)
 - [x] Dashboard: High-Yield Dividend Stocks card (seed: VNOM, SLB, EOG; integrate dividend yield data later)
+- [x] Dashboard: Politician Leaderboard (Congressional trading disclosures + performance since filing)
 - [x] Dividend fundamentals (v0): show yield, payout ratio, ex-div date for dividend watchlist
 - [x] Stock detail drawer: evidence timeline + score breakdown (v0 for Top Picks)
 - [ ] Admin tools: thresholds, allow/deny lists, segment priority config

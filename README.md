@@ -60,3 +60,37 @@ python -m app.cli send-daily-subscriber-alerts-v0
 ## Code (in progress)
 - Backend (FastAPI/SQLite): `backend/`
 - Frontend (admin UI): `frontend/`
+
+## Data Provider Reference (Cost Strategy)
+
+### 1) The "Free" Data Stack ($0 Cost)
+| Source | Free Tier Details | Best Use Case |
+|---|---|---|
+| CapitolTrades.com | 100% Free. No registration needed. | Political Trades: Use this for manual verification or lightweight scraping of Congressional trades (like your `$PLD` example). |
+| SEC EDGAR API | 100% Free. Government-run. | Insiders (Form 4): Raw source for every CEO/Director buy. Most accurate but requires technical parsing. |
+| OpenInsider | Free Web Access. | Insider Filtering: Quick way to find "Cluster Buys" and "Open Market Purchases" (Code `P`) without a subscription. |
+| Finnhub.io | Free Tier available. | Social Sentiment: Provides basic sentiment analysis and stock news for free with rate limits. |
+| Financial Modeling Prep (FMP) | 250 calls/day free. | All-in-One: Great for pulling basic stock quotes and Senate/House disclosures for testing. |
+| Alpaca Markets | Free API Key. | Real-Time Price: Provides real-time trade data (IEX exchange only) at no cost. |
+
+### 2) The "Freemium" Transition (Starts Free, Then Paid)
+These sources are useful early, but likely require paid plans as automation/usage scales.
+
+- **Quiver Quantitative**
+  - Free: Basic web access to see which politicians are trading what.
+  - Paid (`$25/mo`): API access for automated dashboard ingestion.
+
+- **WhaleWisdom**
+  - Free: View last 2 years of 13F (institutional) data and set up 5 email alerts.
+  - Paid (`$90/qtr`): API access to download data into your own database.
+
+- **Unusual Whales**
+  - Free: Limited "Shamu" highlights on website.
+  - Paid (`$50/mo`): Options flow (whale trades), one of the hardest datasets to source for free in real-time.
+
+### 3) Factual Recommendation for This Dashboard
+To keep costs near `$0` during build/pilot:
+
+- **Political/Whale Data:** Use CapitolTrades.com and OpenInsider as web views (manual/embedded visibility) before API spend.
+- **Market/Fundamentals:** Use FMP free tier (`250 calls/day`) for a 10–20 stock watchlist refreshed a few times daily.
+- **Real-Time Alerts:** Use Alpaca for price feed (free, factual, institutional-grade for pilot use).
