@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from sqlmodel import col
 
 from app.connectors.form4 import parse_form4_xml
+from app.connectors.capitoltrades import CapitolTradesClient, CapitolTradesError, parse_capitoltrades_html
 from app.connectors.fmp_congress import FmpCongressClient, FmpCongressError, parse_fmp_disclosures
 from app.connectors.openfigi import default_openfigi_client, pick_best_equity_mapping
 from app.connectors.sec_edgar import default_sec_client
@@ -599,6 +600,84 @@ def ingest_congress_fmp(
     typer.echo(
         f"Congress FMP: rows_fetched={len(rows)} inserted={inserted} updated={updated} "
         f"house={include_house} senate={include_senate}"
+    )
+
+
+@app.command("ingest-congress-capitoltrades")
+def ingest_congress_capitoltrades(
+    pages: int = typer.Option(2, help="How many CapitolTrades pages to ingest"),
+    page_size: int = typer.Option(96, help="Rows per page requested"),
+    source: str = typer.Option("capitoltrades", help="Source label"),
+) -> None:
+    """
+    Ingest congressional disclosures from CapitolTrades public pages (no API key).
+    """
+
+    client = CapitolTradesClient(timeout_s=20.0)
+    rows = []
+    pages_ok = 0
+    pages_failed = 0
+    for p in range(1, max(1, pages) + 1):
+        try:
+            html = client.fetch_trades_page(page=p, page_size=page_size)
+            parsed = parse_capitoltrades_html(html)
+            rows.extend(parsed)
+            pages_ok += 1
+        except CapitolTradesError as e:
+            pages_failed += 1
+            typer.echo(f"WARN: page={p}: {e}")
+
+    inserted = 0
+    updated = 0
+    with Session(engine) as session:
+        for r in rows:
+            existing = session.exec(
+                select(CongressTrade).where(
+                    col(CongressTrade.source) == source.strip(),
+                    col(CongressTrade.source_id) == r.source_id,
+                )
+            ).first()
+            if existing is None:
+                session.add(
+                    CongressTrade(
+                        source=source.strip(),
+                        source_id=r.source_id,
+                        chamber=r.chamber,
+                        politician=r.politician,
+                        ticker=r.ticker,
+                        tx_type=r.tx_type,
+                        amount_range=r.amount_range,
+                        trade_date=r.trade_date,
+                        filing_date=r.filing_date,
+                        reported_at=r.reported_at,
+                        raw=r.raw,
+                    )
+                )
+                inserted += 1
+            else:
+                changed = False
+                for k, v in {
+                    "chamber": r.chamber,
+                    "politician": r.politician,
+                    "ticker": r.ticker,
+                    "tx_type": r.tx_type,
+                    "amount_range": r.amount_range,
+                    "trade_date": r.trade_date,
+                    "filing_date": r.filing_date,
+                    "reported_at": r.reported_at,
+                    "raw": r.raw,
+                }.items():
+                    if getattr(existing, k) != v:
+                        setattr(existing, k, v)
+                        changed = True
+                if changed:
+                    session.add(existing)
+                    updated += 1
+        session.commit()
+
+    typer.echo(
+        f"Congress CapitolTrades: pages_ok={pages_ok} pages_failed={pages_failed} "
+        f"rows_fetched={len(rows)} inserted={inserted} updated={updated}"
     )
 
 
@@ -1752,10 +1831,21 @@ def run_daily_pipeline_v0(
         except Exception as e:
             typer.echo(f"[pipeline] WARN reddit ingest failed: {e}")
     if run_congress_ingest:
-        try:
-            ingest_congress_fmp(limit=200, include_house=True, include_senate=True, source="fmp")
-        except Exception as e:
-            typer.echo(f"[pipeline] WARN congress ingest failed: {e}")
+        fmp_key = (settings.fmp_api_key or "").strip()
+        if fmp_key:
+            try:
+                ingest_congress_fmp(limit=200, include_house=True, include_senate=True, source="fmp")
+            except Exception as e:
+                typer.echo(f"[pipeline] WARN congress FMP ingest failed: {e}")
+                try:
+                    ingest_congress_capitoltrades(pages=2, page_size=96, source="capitoltrades")
+                except Exception as e2:
+                    typer.echo(f"[pipeline] WARN congress CapitolTrades fallback failed: {e2}")
+        else:
+            try:
+                ingest_congress_capitoltrades(pages=2, page_size=96, source="capitoltrades")
+            except Exception as e:
+                typer.echo(f"[pipeline] WARN congress CapitolTrades ingest failed: {e}")
 
     # 3) Ensure watchlist prices and dividend fundamentals refresh.
     watch_tickers = (
