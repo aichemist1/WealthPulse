@@ -119,3 +119,32 @@ def test_segments_includes_congressional_trading_theme() -> None:
         assert congress["name"] == "Congressional Trading"
         tickers = {p["ticker"] for p in congress["picks"]}
         assert "PLD" in tickers
+
+
+def test_segments_includes_congress_only_ticker_without_recs_or_fresh() -> None:
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        now = datetime.utcnow()
+        session.add(
+            CongressTrade(
+                source="fmp",
+                source_id="senate-1",
+                chamber="senate",
+                politician="D. Taylor",
+                ticker="NVDA",
+                tx_type="purchase",
+                amount_range="$15k - $50k",
+                trade_date=now,
+                filing_date=now,
+            )
+        )
+        session.add(PriceBar(ticker="NVDA", date=(now - timedelta(days=1)).date().isoformat(), close=100.0, source="stooq"))
+        session.add(PriceBar(ticker="NVDA", date=now.date().isoformat(), close=106.0, source="stooq"))
+        session.commit()
+
+        out = compute_segments_v0(session=session, picks_per_segment=3)
+        congress = next(s for s in out["segments"] if s["key"] == "congress")
+        tickers = {p["ticker"] for p in congress["picks"]}
+        assert "NVDA" in tickers

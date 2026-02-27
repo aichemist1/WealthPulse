@@ -156,7 +156,7 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
     # Build one merged evidence view per ticker.
     fresh_by_ticker = {r.ticker: r for r in fresh_rows}
     recs_by_ticker = {r.ticker: r for r in recs_rows}
-    all_tickers = sorted(set(fresh_by_ticker.keys()) | set(recs_by_ticker.keys()))
+    base_tickers = set(fresh_by_ticker.keys()) | set(recs_by_ticker.keys())
 
     SEGMENT_PRIORITY = {
         "insider": 1,
@@ -174,32 +174,37 @@ def compute_segments_v0(*, session: Session, picks_per_segment: int = 2) -> dict
     congress_by_ticker: dict[str, list[CongressTrade]] = {}
     congress_latest_dt: Optional[datetime] = None
     prices_by_ticker: dict[str, list[tuple[str, float]]] = {}
-    if all_tickers:
-        lookback_start = datetime.utcnow() - timedelta(days=365)
-        congress_rows = list(
+    lookback_start = datetime.utcnow() - timedelta(days=365)
+    congress_rows = list(
+        session.exec(
+            select(CongressTrade)
+            .where(CongressTrade.ticker != "")
+            .where((CongressTrade.filing_date >= lookback_start) | (CongressTrade.trade_date >= lookback_start))  # noqa: E711
+            .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.trade_date).desc(), col(CongressTrade.detected_at).desc())
+            .limit(1000)
+        ).all()
+    )
+    for row in congress_rows:
+        ticker = str(row.ticker or "").upper().strip()
+        if not ticker:
+            continue
+        congress_by_ticker.setdefault(ticker, []).append(row)
+        row_dt = row.filing_date or row.trade_date
+        if row_dt and (congress_latest_dt is None or row_dt > congress_latest_dt):
+            congress_latest_dt = row_dt
+
+    all_tickers = sorted(base_tickers | set(congress_by_ticker.keys()))
+
+    if congress_by_ticker:
+        price_rows = list(
             session.exec(
-                select(CongressTrade)
-                .where(col(CongressTrade.ticker).in_(all_tickers))
-                .where((CongressTrade.filing_date >= lookback_start) | (CongressTrade.trade_date >= lookback_start))  # noqa: E711
-                .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.trade_date).desc(), col(CongressTrade.detected_at).desc())
+                select(PriceBar.ticker, PriceBar.date, PriceBar.close)
+                .where(col(PriceBar.ticker).in_(list(congress_by_ticker.keys())), PriceBar.source == "stooq")
+                .order_by(col(PriceBar.ticker), col(PriceBar.date))
             ).all()
         )
-        for row in congress_rows:
-            congress_by_ticker.setdefault(row.ticker, []).append(row)
-            row_dt = row.filing_date or row.trade_date
-            if row_dt and (congress_latest_dt is None or row_dt > congress_latest_dt):
-                congress_latest_dt = row_dt
-
-        if congress_by_ticker:
-            price_rows = list(
-                session.exec(
-                    select(PriceBar.ticker, PriceBar.date, PriceBar.close)
-                    .where(col(PriceBar.ticker).in_(list(congress_by_ticker.keys())), PriceBar.source == "stooq")
-                    .order_by(col(PriceBar.ticker), col(PriceBar.date))
-                ).all()
-            )
-            for ticker, day, close in price_rows:
-                prices_by_ticker.setdefault(str(ticker), []).append((str(day), float(close)))
+        for ticker, day, close in price_rows:
+            prices_by_ticker.setdefault(str(ticker), []).append((str(day), float(close)))
 
     for ticker in all_tickers:
         fresh = fresh_by_ticker.get(ticker)
