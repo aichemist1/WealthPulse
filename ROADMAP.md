@@ -81,6 +81,10 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [x] AWS SSM deploy script (no inbound SSH)
 - [x] Troubleshooting guide (restart/logs/common issues)
 - [x] Cron job spec + implementation for daily ingestion/snapshots/draft generation on VM
+- [ ] Enforce Postgres-only runtime (no SQLite fallback in deployed env)
+- [ ] Add ingestion run telemetry tables (`ingestion_runs`, `ingestion_step_runs`)
+- [ ] Add Data Ops admin view (source counts, freshness, failures)
+- [ ] Add source-level retries/backoff + degraded run status
 
 ## Current Status (as of 2026-02-16)
 - MVP is functional end-to-end: ingestion → scoring → admin review → subscriber send.
@@ -89,6 +93,6 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - Next priority remains reliability/ops hardening (scheduler + data-quality warnings + observability).
 
 ## Next 3 Execution Steps
-1. Add data-quality warnings in UI (stale feeds, low coverage, partial runs).
-2. Add minimal observability (pipeline run status + failure counters in Runs).
-3. Add runbook checks for pipeline freshness in Runs + troubleshooting docs.
+1. Implement clean pipeline telemetry (step status, rows, latest_event_at, errors).
+2. Add Data Ops UI + API for backend data validation and source freshness.
+3. Enforce Postgres-only in deployed env and remove silent SQLite drift.

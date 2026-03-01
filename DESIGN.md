@@ -65,6 +65,18 @@ Cloud-agnostic v0 deployment uses:
 - Only port **80** is public in the IP-only pilot (domain/TLS later)
 - Backend is private; all API calls go through `/api/*`
 
+## 3-tier architecture (implementation contract)
+We keep a modular monolith backend, but deploy as strict 3-tier:
+- **Tier 1 (Web):** Caddy serves SPA and proxies API routes.
+- **Tier 2 (App):** FastAPI backend + ingestion/snapshot pipeline workers (same codebase).
+- **Tier 3 (Data):** Postgres (single source of truth).
+
+Rules:
+- Production backend must use Postgres (`WEALTHPULSE_DB_URL` required).
+- No silent SQLite fallback in deployed environments.
+- DB is queryable by admin/operator for validation (`psql`/DB client).
+- Tier 3 is private (not publicly exposed).
+
 ### Local dev constraints
 - Optimized for low CPU/RAM: one backend process + one frontend dev server + SQLite.
 - All computations produce an auditable daily snapshot so results are reproducible.
@@ -258,6 +270,63 @@ Rather than “refresh everything constantly”, we run each listener on an inte
 - **Medium lane (10–15 minutes, optional):** Listener (social mentions)
   - Rationale: social moves in “waves”; persistence check prevents reacting to single spikes.
 - **Slow lane (daily):** fundamentals / static reference data (e.g., sector mappings, dividend metadata)
+
+## Ingestion pipeline contract (stabilization)
+Formalize one orchestration path: `run-daily-pipeline-v0` with explicit steps in fixed order:
+1) SEC Form 4
+2) SEC 13D/13G
+3) Congressional trading (**CapitolTrades** for current phase)
+4) Prices
+5) Snapshots/scoring
+
+Each step must persist run telemetry:
+- `started_at`
+- `completed_at`
+- `status` (`running|succeeded|failed|degraded`)
+- `rows_ingested`
+- `latest_event_at`
+- `error_message` (nullable)
+- `attempt_count`
+
+Retry/fallback policy:
+- SEC steps: retry with bounded attempts and backoff.
+- Congress step: primary source is CapitolTrades (current phase); mark degraded if zero rows for consecutive runs.
+- Pipeline continues best-effort, but final run status is `degraded` when critical sources fail.
+
+## Schema definitions (stabilization)
+In addition to existing domain tables (form4/sc13/congress/prices/snapshots), add operational tables:
+
+### `ingestion_runs`
+- `id` (pk)
+- `run_type` (`daily_pipeline_v0`)
+- `as_of`
+- `started_at`
+- `completed_at`
+- `status` (`running|succeeded|failed|degraded`)
+- `summary_json`
+- `created_at`
+
+### `ingestion_step_runs`
+- `id` (pk)
+- `ingestion_run_id` (fk -> ingestion_runs.id)
+- `step_name` (`form4|sc13|congress|prices|snapshots`)
+- `source_name` (`sec_edgar|capitoltrades|stooq|internal`)
+- `started_at`
+- `completed_at`
+- `status` (`running|succeeded|failed|degraded`)
+- `rows_ingested`
+- `latest_event_at`
+- `attempt_count`
+- `error_message` (nullable)
+- `metrics_json` (optional details: rows_seen, rows_updated, etc.)
+
+### `ingestion_source_health` (optional materialized status table)
+- `source_name` (pk)
+- `last_success_at`
+- `last_failure_at`
+- `last_rows_ingested`
+- `consecutive_failures`
+- `last_error`
 
 ### Scheduling mechanism (v0)
 - Local/dev: run on-demand via CLI and the demo script.

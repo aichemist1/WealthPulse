@@ -605,6 +605,56 @@ class BacktestRun(SQLModel, table=True):
     )
 
 
+class IngestionRun(SQLModel, table=True):
+    """
+    Pipeline-level operational telemetry.
+    """
+
+    __tablename__ = "ingestion_runs"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    run_type: str = Field(default="daily_pipeline_v0", index=True)
+    as_of: datetime = Field(index=True)
+    started_at: datetime = Field(default_factory=utcnow, index=True)
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+    status: str = Field(default="running", index=True)  # running|succeeded|failed|degraded
+    summary_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+    __table_args__ = (Index("ix_ingestion_run_type_as_of", "run_type", "as_of"),)
+
+
+class IngestionStepRun(SQLModel, table=True):
+    """
+    Per-source/per-step ingestion telemetry for observability and debugging.
+    """
+
+    __tablename__ = "ingestion_step_runs"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    ingestion_run_id: str = Field(foreign_key="ingestion_runs.id", index=True)
+
+    step_name: str = Field(index=True)  # form4|sc13|congress|prices|snapshots
+    source_name: str = Field(index=True)  # sec_edgar|capitoltrades|stooq|internal
+
+    started_at: datetime = Field(default_factory=utcnow, index=True)
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+    status: str = Field(default="running", index=True)  # running|succeeded|failed|degraded
+
+    rows_ingested: int = Field(default=0, index=True)
+    latest_event_at: Optional[datetime] = Field(default=None, index=True)
+    attempt_count: int = Field(default=1)
+    error_message: Optional[str] = None
+
+    metrics_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_ing_step_run_step_started", "step_name", "started_at"),
+        Index("ix_ing_step_run_source_started", "source_name", "started_at"),
+    )
+
+
 class CongressTrade(SQLModel, table=True):
     """
     Normalized congressional trading disclosures (House/Senate).

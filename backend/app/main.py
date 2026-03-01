@@ -32,6 +32,10 @@ from app.models import (
     BacktestRun,
     CongressTrade,
     PriceBar,
+    IngestionRun,
+    IngestionStepRun,
+    InsiderTx,
+    LargeOwnerFiling,
 )
 from app.settings import settings
 from app.snapshot.watchlists import compute_watchlist, parse_ticker_csv
@@ -443,6 +447,95 @@ def admin_social_coverage(hours: int = 24, top_n: int = 10, session: Session = D
         "rows_window": len(recent),
         "distinct_tickers_window": len(mentions_by_ticker),
         "top_tickers_window": [{"ticker": t, "mentions": m} for (t, m) in top],
+    }
+
+
+@app.get("/admin/data-ops/latest")
+def admin_data_ops_latest(session: Session = Depends(get_session)) -> dict:
+    """
+    Backend-ingestion observability snapshot for operators.
+    """
+
+    latest_run = session.exec(
+        select(IngestionRun)
+        .where(col(IngestionRun.run_type) == "daily_pipeline_v0")
+        .order_by(col(IngestionRun.started_at).desc(), col(IngestionRun.created_at).desc())
+    ).first()
+    steps = (
+        list(
+            session.exec(
+                select(IngestionStepRun)
+                .where(col(IngestionStepRun.ingestion_run_id) == latest_run.id)
+                .order_by(col(IngestionStepRun.started_at).asc())
+            ).all()
+        )
+        if latest_run
+        else []
+    )
+
+    latest_form4 = session.exec(
+        select(InsiderTx).where(InsiderTx.event_date != None).order_by(col(InsiderTx.event_date).desc())  # noqa: E711
+    ).first()
+    latest_sc13 = session.exec(
+        select(LargeOwnerFiling).where(LargeOwnerFiling.filed_at != None).order_by(col(LargeOwnerFiling.filed_at).desc())  # noqa: E711
+    ).first()
+    latest_congress = session.exec(
+        select(CongressTrade)
+        .where((CongressTrade.filing_date != None) | (CongressTrade.trade_date != None))  # noqa: E711
+        .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.trade_date).desc(), col(CongressTrade.detected_at).desc())
+    ).first()
+    latest_price = session.exec(select(PriceBar).order_by(col(PriceBar.date).desc())).first()
+
+    counts = {
+        "insider_txs": len(session.exec(select(InsiderTx.id)).all()),
+        "sc13_filings": len(session.exec(select(LargeOwnerFiling.id)).all()),
+        "congress_trades": len(session.exec(select(CongressTrade.id)).all()),
+        "price_bars": len(session.exec(select(PriceBar.id)).all()),
+        "snapshot_runs": len(session.exec(select(SnapshotRun.id)).all()),
+    }
+
+    return {
+        "as_of": datetime.utcnow().isoformat(),
+        "db_url": settings.db_url,
+        "counts": counts,
+        "latest_events": {
+            "form4_event_date": latest_form4.event_date.isoformat() if (latest_form4 and latest_form4.event_date) else None,
+            "sc13_filed_at": latest_sc13.filed_at.isoformat() if (latest_sc13 and latest_sc13.filed_at) else None,
+            "congress_filing_or_trade": (
+                (latest_congress.filing_date or latest_congress.trade_date).isoformat()
+                if (latest_congress and (latest_congress.filing_date or latest_congress.trade_date))
+                else None
+            ),
+            "price_bar_date": latest_price.date if latest_price else None,
+        },
+        "latest_pipeline_run": (
+            {
+                "id": latest_run.id,
+                "run_type": latest_run.run_type,
+                "as_of": latest_run.as_of.isoformat() if latest_run.as_of else None,
+                "started_at": latest_run.started_at.isoformat() if latest_run.started_at else None,
+                "completed_at": latest_run.completed_at.isoformat() if latest_run.completed_at else None,
+                "status": latest_run.status,
+                "summary": latest_run.summary_json,
+                "steps": [
+                    {
+                        "step_name": s.step_name,
+                        "source_name": s.source_name,
+                        "status": s.status,
+                        "rows_ingested": s.rows_ingested,
+                        "latest_event_at": s.latest_event_at.isoformat() if s.latest_event_at else None,
+                        "attempt_count": s.attempt_count,
+                        "error_message": s.error_message,
+                        "metrics": s.metrics_json,
+                        "started_at": s.started_at.isoformat() if s.started_at else None,
+                        "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+                    }
+                    for s in steps
+                ],
+            }
+            if latest_run
+            else None
+        ),
     }
 
 

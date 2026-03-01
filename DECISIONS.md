@@ -258,6 +258,24 @@ Record decisions here so we can resume without re-deriving context.
   - `python -m app.cli pipeline-status-v0`
   - prints ingestion/snapshot/artifact freshness + draft status.
 - Delivery remains manual-only:
+
+## 2026-03-01 — 3-tier stabilization + ingestion observability
+- Architecture remains **modular monolith** for backend logic, deployed as strict **3-tier**:
+  - Tier 1: `web` (Caddy + SPA)
+  - Tier 2: `backend` (FastAPI + pipeline)
+  - Tier 3: `postgres` (single source of truth)
+- Continue with **Caddy** for current production path; add **Nginx alternative** to future roadmap (v2).
+- Ingestion stabilization decision:
+  - formalize one orchestrator pipeline with fixed steps:
+    1) Form 4 (SEC)
+    2) 13D/13G (SEC)
+    3) Congress (CapitolTrades for current phase)
+    4) Prices
+    5) Snapshots/scoring
+  - each step must log: `started`, `succeeded/failed`, `rows_ingested`, `latest_event_at`, `error`.
+- Data operability decision:
+  - prioritize Postgres queryability and backend observability so admin can verify what was ingested (not rely on UI cards alone).
+  - add ingestion run/step telemetry tables and a Data Ops admin view as the next implementation block.
   - pipeline generates subscriber draft run; admin still sends from dashboard.
 
 ## 2026-02-18 — Congressional Trading widget (v0)

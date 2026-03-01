@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import csv
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from app.models import AlertDelivery, AlertRun
 from app.models import DailySnapshotArtifact
 from app.models import BacktestRun
 from app.models import CongressTrade
+from app.models import IngestionRun, IngestionStepRun
 from app.snapshot.insider_whales import compute_insider_whales, window_start
 from app.security_map import parse_security_map_csv
 from app.snapshot.thirteenf_whales import HoldingValueRow, compute_13f_whales, previous_quarter_end
@@ -1736,6 +1738,22 @@ def pipeline_status_v0(
             select(BacktestRun).where(col(BacktestRun.kind) == "backtest_v0").order_by(col(BacktestRun.completed_at).desc(), col(BacktestRun.started_at).desc())
         ).first()
         latest_alert = session.exec(select(AlertRun).order_by(col(AlertRun.created_at).desc())).first()
+        latest_ing_run = session.exec(
+            select(IngestionRun)
+            .where(col(IngestionRun.run_type) == "daily_pipeline_v0")
+            .order_by(col(IngestionRun.started_at).desc(), col(IngestionRun.created_at).desc())
+        ).first()
+        latest_steps = (
+            list(
+                session.exec(
+                    select(IngestionStepRun)
+                    .where(col(IngestionStepRun.ingestion_run_id) == latest_ing_run.id)
+                    .order_by(col(IngestionStepRun.started_at).asc())
+                ).all()
+            )
+            if latest_ing_run
+            else []
+        )
 
     def fmt_dt(x: datetime | None) -> str:
         return x.isoformat() if x else "n/a"
@@ -1770,6 +1788,15 @@ def pipeline_status_v0(
     typer.echo("[alerts]")
     typer.echo(f"latest_alert_run_created_at: {fmt_dt(latest_alert.created_at if latest_alert else None)}")
     typer.echo(f"latest_alert_run_status: {(latest_alert.status if latest_alert else 'n/a')}")
+    typer.echo("")
+    typer.echo("[pipeline]")
+    typer.echo(f"latest_pipeline_run_started_at: {fmt_dt(latest_ing_run.started_at if latest_ing_run else None)}")
+    typer.echo(f"latest_pipeline_run_status: {(latest_ing_run.status if latest_ing_run else 'n/a')}")
+    for s in latest_steps:
+        typer.echo(
+            f"step={s.step_name} source={s.source_name} status={s.status} "
+            f"rows={s.rows_ingested} latest={fmt_dt(s.latest_event_at)} attempts={s.attempt_count}"
+        )
 
 
 @app.command("run-daily-pipeline-v0")
@@ -1779,7 +1806,7 @@ def run_daily_pipeline_v0(
     sec_limit: int = typer.Option(200, help="Per-day SEC ingest filing limit (Form4/SC13)"),
     bootstrap_13f_if_missing: bool = typer.Option(True, help="If no 13F snapshot exists, bootstrap 13F ingest+mapping"),
     top_n: int = typer.Option(20, help="Top rows per snapshot"),
-    run_congress_ingest: bool = typer.Option(True, help="Run congressional disclosures ingest (FMP)"),
+    run_congress_ingest: bool = typer.Option(True, help="Run congressional disclosures ingest (CapitolTrades)"),
     run_reddit_ingest: bool = typer.Option(False, help="Run Reddit social ingest step"),
     run_backtest: bool = typer.Option(True, help="Run backtest step"),
     backtest_lookback_days: int = typer.Option(120, help="Backtest historical window days"),
@@ -1802,58 +1829,208 @@ def run_daily_pipeline_v0(
     else:
         as_of_dt = datetime.utcnow()
 
-    client = default_sec_client()
-    typer.echo(f"[pipeline] start as_of={as_of_dt.isoformat()}")
+    with Session(engine) as session:
+        run = IngestionRun(run_type="daily_pipeline_v0", as_of=as_of_dt, started_at=datetime.utcnow(), status="running", summary_json={})
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+    run_id = run.id
 
-    # 1) Best-effort SEC ingestion with fallback days.
+    def _start_step(step_name: str, source_name: str) -> str:
+        with Session(engine) as session:
+            step = IngestionStepRun(
+                ingestion_run_id=run_id,
+                step_name=step_name,
+                source_name=source_name,
+                started_at=datetime.utcnow(),
+                status="running",
+            )
+            session.add(step)
+            session.commit()
+            session.refresh(step)
+            return step.id
+
+    def _finish_step(
+        step_id: str,
+        *,
+        status: str,
+        rows_ingested: int,
+        latest_event_at: datetime | None,
+        attempt_count: int,
+        error_message: str | None = None,
+        metrics: dict | None = None,
+    ) -> None:
+        with Session(engine) as session:
+            step = session.exec(select(IngestionStepRun).where(col(IngestionStepRun.id) == step_id)).first()
+            if step is None:
+                return
+            step.completed_at = datetime.utcnow()
+            step.status = status
+            step.rows_ingested = max(0, int(rows_ingested or 0))
+            step.latest_event_at = latest_event_at
+            step.attempt_count = max(1, int(attempt_count or 1))
+            step.error_message = (error_message or "")[:2000] or None
+            step.metrics_json = metrics or {}
+            session.add(step)
+            session.commit()
+
+    client = default_sec_client()
+    typer.echo(f"[pipeline] start run_id={run_id} as_of={as_of_dt.isoformat()}")
+
+    step_statuses: list[str] = []
+    summary: dict[str, dict] = {}
+    sec_retries = max(1, int(settings.sec_retries))
+    backoff_s = max(0.0, float(settings.sec_backoff_s))
+
+    # 1) SEC Form4
+    step_id = _start_step("form4", "sec_edgar")
     f4_ingested = 0
-    sc13_ingested = 0
+    f4_seen = 0
+    f4_failed_days = 0
+    f4_attempts = 0
+    f4_error = ""
     for offset in range(1, max(1, sec_lookback_days) + 1):
         day = (as_of_dt - timedelta(days=offset)).date()
-        with Session(engine) as session:
+        ok = False
+        for attempt in range(1, sec_retries + 1):
+            f4_attempts += 1
             try:
-                r = ingest_form4_day(session=session, client=client, day=day, universe_tickers=None, limit=sec_limit)
+                with Session(engine) as session:
+                    r = ingest_form4_day(session=session, client=client, day=day, universe_tickers=None, limit=sec_limit)
+                f4_seen += int(getattr(r, "filings_seen", 0) or 0)
                 f4_ingested += int(getattr(r, "filings_ingested", 0) or 0)
                 typer.echo(f"[pipeline] form4 day={day.isoformat()} seen={r.filings_seen} ingested={r.filings_ingested}")
+                ok = True
+                break
             except Exception as e:
-                typer.echo(f"[pipeline] WARN form4 day={day.isoformat()} failed: {e}")
+                f4_error = str(e)
+                if attempt < sec_retries and backoff_s > 0:
+                    time.sleep(backoff_s * attempt)
+        if not ok:
+            f4_failed_days += 1
+            typer.echo(f"[pipeline] WARN form4 day={day.isoformat()} failed after {sec_retries} attempts: {f4_error}")
+    with Session(engine) as session:
+        latest_form4 = session.exec(select(InsiderTx).where(InsiderTx.event_date != None).order_by(col(InsiderTx.event_date).desc())).first()  # noqa: E711
+    f4_status = "succeeded" if f4_failed_days == 0 else ("degraded" if f4_ingested > 0 else "failed")
+    _finish_step(
+        step_id,
+        status=f4_status,
+        rows_ingested=f4_ingested,
+        latest_event_at=(latest_form4.event_date if latest_form4 else None),
+        attempt_count=f4_attempts,
+        error_message=(f4_error if f4_status != "succeeded" else None),
+        metrics={"rows_seen": f4_seen, "failed_days": f4_failed_days, "window_days": sec_lookback_days},
+    )
+    step_statuses.append(f4_status)
+    summary["form4"] = {"status": f4_status, "rows_ingested": f4_ingested, "failed_days": f4_failed_days}
+
+    # 2) SEC SC13
+    step_id = _start_step("sc13", "sec_edgar")
+    sc13_ingested = 0
+    sc13_seen = 0
+    sc13_failed_days = 0
+    sc13_attempts = 0
+    sc13_error = ""
+    for offset in range(1, max(1, sec_lookback_days) + 1):
+        day = (as_of_dt - timedelta(days=offset)).date()
+        ok = False
+        for attempt in range(1, sec_retries + 1):
+            sc13_attempts += 1
             try:
-                r2 = ingest_sc13_day(session=session, client=client, day=day, universe_tickers=None, limit=sec_limit)
+                with Session(engine) as session:
+                    r2 = ingest_sc13_day(session=session, client=client, day=day, universe_tickers=None, limit=sec_limit)
+                sc13_seen += int(getattr(r2, "filings_seen", 0) or 0)
                 sc13_ingested += int(getattr(r2, "filings_ingested", 0) or 0)
                 typer.echo(f"[pipeline] sc13 day={day.isoformat()} seen={r2.filings_seen} ingested={r2.filings_ingested}")
+                ok = True
+                break
             except Exception as e:
-                typer.echo(f"[pipeline] WARN sc13 day={day.isoformat()} failed: {e}")
+                sc13_error = str(e)
+                if attempt < sec_retries and backoff_s > 0:
+                    time.sleep(backoff_s * attempt)
+        if not ok:
+            sc13_failed_days += 1
+            typer.echo(f"[pipeline] WARN sc13 day={day.isoformat()} failed after {sec_retries} attempts: {sc13_error}")
+    with Session(engine) as session:
+        latest_sc13 = session.exec(
+            select(LargeOwnerFiling).where(LargeOwnerFiling.filed_at != None).order_by(col(LargeOwnerFiling.filed_at).desc())  # noqa: E711
+        ).first()
+    sc13_status = "succeeded" if sc13_failed_days == 0 else ("degraded" if sc13_ingested > 0 else "failed")
+    _finish_step(
+        step_id,
+        status=sc13_status,
+        rows_ingested=sc13_ingested,
+        latest_event_at=(latest_sc13.filed_at if latest_sc13 else None),
+        attempt_count=sc13_attempts,
+        error_message=(sc13_error if sc13_status != "succeeded" else None),
+        metrics={"rows_seen": sc13_seen, "failed_days": sc13_failed_days, "window_days": sec_lookback_days},
+    )
+    step_statuses.append(sc13_status)
+    summary["sc13"] = {"status": sc13_status, "rows_ingested": sc13_ingested, "failed_days": sc13_failed_days}
 
-    # 2) Optional social ingest.
+    # Optional social ingest remains best-effort, outside the 5 critical steps.
     if run_reddit_ingest:
         try:
             ingest_social_reddit(lookback_hours=24, dry_run=False)
         except Exception as e:
             typer.echo(f"[pipeline] WARN reddit ingest failed: {e}")
+
+    # 3) Congress (CapitolTrades)
+    step_id = _start_step("congress", "capitoltrades")
+    congress_attempts = 0
+    congress_error = ""
+    with Session(engine) as session:
+        congress_before = len(session.exec(select(CongressTrade.id).where(col(CongressTrade.source) == "capitoltrades")).all())
     if run_congress_ingest:
-        fmp_key = (settings.fmp_api_key or "").strip()
-        if fmp_key:
-            try:
-                ingest_congress_fmp(limit=200, include_house=True, include_senate=True, source="fmp")
-            except Exception as e:
-                typer.echo(f"[pipeline] WARN congress FMP ingest failed: {e}")
-                try:
-                    ingest_congress_capitoltrades(pages=2, page_size=96, source="capitoltrades")
-                except Exception as e2:
-                    typer.echo(f"[pipeline] WARN congress CapitolTrades fallback failed: {e2}")
-        else:
+        for attempt in range(1, max(1, min(sec_retries, 3)) + 1):
+            congress_attempts += 1
             try:
                 ingest_congress_capitoltrades(pages=2, page_size=96, source="capitoltrades")
+                congress_error = ""
+                break
             except Exception as e:
-                typer.echo(f"[pipeline] WARN congress CapitolTrades ingest failed: {e}")
+                congress_error = str(e)
+                if attempt < max(1, min(sec_retries, 3)) and backoff_s > 0:
+                    time.sleep(backoff_s * attempt)
+    with Session(engine) as session:
+        congress_after = len(session.exec(select(CongressTrade.id).where(col(CongressTrade.source) == "capitoltrades")).all())
+        latest_congress = session.exec(
+            select(CongressTrade)
+            .where(col(CongressTrade.source) == "capitoltrades")
+            .order_by(col(CongressTrade.filing_date).desc(), col(CongressTrade.trade_date).desc(), col(CongressTrade.detected_at).desc())
+        ).first()
+    congress_rows = max(0, congress_after - congress_before)
+    latest_congress_dt = (latest_congress.filing_date or latest_congress.trade_date) if latest_congress else None
+    if not run_congress_ingest:
+        congress_status = "succeeded"
+    elif congress_error and congress_rows == 0:
+        congress_status = "failed"
+    elif congress_rows == 0:
+        congress_status = "degraded"
+    else:
+        congress_status = "succeeded"
+    _finish_step(
+        step_id,
+        status=congress_status,
+        rows_ingested=congress_rows,
+        latest_event_at=latest_congress_dt,
+        attempt_count=max(1, congress_attempts),
+        error_message=(congress_error if congress_status != "succeeded" else None),
+        metrics={"rows_total_source": congress_after, "ingest_enabled": run_congress_ingest},
+    )
+    step_statuses.append(congress_status)
+    summary["congress"] = {"status": congress_status, "rows_ingested": congress_rows}
 
-    # 3) Ensure watchlist prices and dividend fundamentals refresh.
+    # 4) Prices
+    step_id = _start_step("prices", "stooq")
+    prices_attempts = 1
+    prices_error = ""
+    bars_inserted = 0
     watch_tickers = (
         parse_ticker_csv(settings.watchlist_etfs)
         + parse_ticker_csv(settings.watchlist_dividend_stocks)
         + parse_ticker_csv(settings.watchlist_congress_tickers)
     )
-    # Add latest disclosed congressional tickers for performance-since-filing metric support.
     with Session(engine) as session:
         recent_congress_tickers = session.exec(
             select(CongressTrade.ticker)
@@ -1867,66 +2044,104 @@ def run_daily_pipeline_v0(
         try:
             with Session(engine) as session:
                 res = ingest_stooq_prices(session=session, tickers=watch_tickers, keep_last_days=260)
+            bars_inserted = int(getattr(res, "bars_inserted", 0) or 0)
             typer.echo(f"[pipeline] prices tickers_seen={res.tickers_seen} bars_inserted={res.bars_inserted}")
         except Exception as e:
+            prices_error = str(e)
             typer.echo(f"[pipeline] WARN prices ingest failed: {e}")
+    else:
+        prices_error = "no_tickers"
     try:
         ingest_dividend_metrics_yahoo(tickers=",".join(parse_ticker_csv(settings.watchlist_dividend_stocks)))
     except Exception as e:
         typer.echo(f"[pipeline] WARN dividend metrics ingest failed: {e}")
-
-    # 4) 13F bootstrap (only when missing) to avoid empty Top Picks on fresh deployments.
-    need_13f_bootstrap = False
     with Session(engine) as session:
+        latest_price = session.exec(select(PriceBar).order_by(col(PriceBar.date).desc())).first()
+    latest_price_dt = None
+    if latest_price and latest_price.date:
+        try:
+            latest_price_dt = datetime.fromisoformat(str(latest_price.date))
+        except Exception:
+            latest_price_dt = None
+    prices_status = "failed" if prices_error and bars_inserted == 0 else ("degraded" if bars_inserted == 0 else "succeeded")
+    _finish_step(
+        step_id,
+        status=prices_status,
+        rows_ingested=bars_inserted,
+        latest_event_at=latest_price_dt,
+        attempt_count=prices_attempts,
+        error_message=(prices_error if prices_status != "succeeded" else None),
+        metrics={"tickers": len(watch_tickers)},
+    )
+    step_statuses.append(prices_status)
+    summary["prices"] = {"status": prices_status, "rows_ingested": bars_inserted, "tickers": len(watch_tickers)}
+
+    # 5) Snapshots/scoring
+    step_id = _start_step("snapshots", "internal")
+    snap_attempts = 1
+    snap_errors: list[str] = []
+    snap_created = 0
+    with Session(engine) as session:
+        run_count_before = len(session.exec(select(SnapshotRun.id)).all())
         latest_13f = session.exec(
             select(SnapshotRun).where(col(SnapshotRun.kind) == "13f_whales").order_by(col(SnapshotRun.as_of).desc(), col(SnapshotRun.created_at).desc())
         ).first()
         need_13f_bootstrap = latest_13f is None
-
     if bootstrap_13f_if_missing and need_13f_bootstrap:
         typer.echo("[pipeline] 13F snapshot missing; running bootstrap ingest.")
         bootstrap_days = [(as_of_dt - timedelta(days=93)).date(), (as_of_dt - timedelta(days=1)).date()]
         for d in bootstrap_days:
-            with Session(engine) as session:
-                try:
+            try:
+                with Session(engine) as session:
                     r = ingest_13f_day(session=session, client=client, day=d, limit=0)
-                    typer.echo(f"[pipeline] 13f day={d.isoformat()} seen={r.filings_seen} ingested={r.filings_ingested} holdings={r.holdings_inserted}")
-                except Exception as e:
-                    typer.echo(f"[pipeline] WARN 13f day={d.isoformat()} failed: {e}")
+                typer.echo(f"[pipeline] 13f day={d.isoformat()} seen={r.filings_seen} ingested={r.filings_ingested} holdings={r.holdings_inserted}")
+            except Exception as e:
+                snap_errors.append(f"13f_bootstrap:{d.isoformat()}:{e}")
+                typer.echo(f"[pipeline] WARN 13f day={d.isoformat()} failed: {e}")
         try:
             enrich_security_map_openfigi(limit=800, batch_size=10)
         except Exception as e:
+            snap_errors.append(f"openfigi:{e}")
             typer.echo(f"[pipeline] WARN openfigi enrichment failed: {e}")
 
-    # 5) Compute snapshot stack.
     report_p = previous_quarter_end(as_of_dt.date()) or previous_quarter_end((as_of_dt - timedelta(days=1)).date())
     if report_p is not None:
         try:
             snapshot_13f_whales(report_period=report_p.isoformat(), top_n=top_n)
         except Exception as e:
+            snap_errors.append(f"snapshot13f:{e}")
             typer.echo(f"[pipeline] WARN snapshot-13f-whales failed: {e}")
     else:
+        snap_errors.append("snapshot13f:no_prior_quarter_end")
         typer.echo("[pipeline] WARN no prior quarter end available for 13F snapshot.")
 
     as_of_s = as_of_dt.isoformat(timespec="seconds")
-    snapshot_recommendations_v0(
-        as_of=as_of_s,
-        top_n=top_n,
-        fresh_days=7,
-        buy_score_threshold=70,
-        insider_min_value=100_000,
-    )
-    snapshot_fresh_signals_v0(
-        as_of=as_of_s,
-        fresh_days=30,
-        insider_min_value=10_000,
-        buy_score_threshold=75,
-        avoid_score_threshold=35,
-        top_n=top_n,
-    )
-    snapshot_daily_artifact_v0(as_of=as_of_s, top_n_rows=25, picks_per_segment=3, force=False)
+    try:
+        snapshot_recommendations_v0(
+            as_of=as_of_s,
+            top_n=top_n,
+            fresh_days=7,
+            buy_score_threshold=70,
+            insider_min_value=100_000,
+        )
+    except Exception as e:
+        snap_errors.append(f"recommendations:{e}")
+    try:
+        snapshot_fresh_signals_v0(
+            as_of=as_of_s,
+            fresh_days=30,
+            insider_min_value=10_000,
+            buy_score_threshold=75,
+            avoid_score_threshold=35,
+            top_n=top_n,
+        )
+    except Exception as e:
+        snap_errors.append(f"fresh_signals:{e}")
+    try:
+        snapshot_daily_artifact_v0(as_of=as_of_s, top_n_rows=25, picks_per_segment=3, force=False)
+    except Exception as e:
+        snap_errors.append(f"artifact:{e}")
 
-    # 6) Optional backtest and draft generation.
     if run_backtest:
         start_s = (as_of_dt - timedelta(days=max(30, backtest_lookback_days))).date().isoformat()
         end_s = as_of_dt.date().isoformat()
@@ -1941,11 +2156,51 @@ def run_daily_pipeline_v0(
                 persist=True,
             )
         except Exception as e:
+            snap_errors.append(f"backtest:{e}")
             typer.echo(f"[pipeline] WARN backtest failed: {e}")
 
     send_daily_subscriber_alerts_cli(as_of=as_of_s, limit_subscribers=0, send=False)
 
-    typer.echo(f"[pipeline] completed. form4_ingested={f4_ingested} sc13_ingested={sc13_ingested}")
+    with Session(engine) as session:
+        run_count_after = len(session.exec(select(SnapshotRun.id)).all())
+    snap_created = max(0, run_count_after - run_count_before)
+    if snap_errors and snap_created == 0:
+        snap_status = "failed"
+    elif snap_errors:
+        snap_status = "degraded"
+    else:
+        snap_status = "succeeded"
+    _finish_step(
+        step_id,
+        status=snap_status,
+        rows_ingested=snap_created,
+        latest_event_at=as_of_dt,
+        attempt_count=snap_attempts,
+        error_message=("; ".join(snap_errors[:3]) if snap_status != "succeeded" else None),
+        metrics={"errors_count": len(snap_errors)},
+    )
+    step_statuses.append(snap_status)
+    summary["snapshots"] = {"status": snap_status, "rows_ingested": snap_created, "errors_count": len(snap_errors)}
+
+    final_status = "succeeded"
+    if "failed" in step_statuses:
+        final_status = "failed"
+    elif "degraded" in step_statuses:
+        final_status = "degraded"
+
+    with Session(engine) as session:
+        ing = session.exec(select(IngestionRun).where(col(IngestionRun.id) == run_id)).first()
+        if ing is not None:
+            ing.completed_at = datetime.utcnow()
+            ing.status = final_status
+            ing.summary_json = summary
+            session.add(ing)
+            session.commit()
+
+    typer.echo(
+        f"[pipeline] completed run_id={run_id} status={final_status} "
+        f"form4_ingested={f4_ingested} sc13_ingested={sc13_ingested} congress_ingested={congress_rows}"
+    )
     pipeline_status_v0(lookback_days=7)
 
 
