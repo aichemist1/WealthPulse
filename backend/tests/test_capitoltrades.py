@@ -45,3 +45,25 @@ def test_parse_capitoltrades_html_from_escaped_chunk_heuristic() -> None:
     assert r.ticker == "PLD"
     assert r.politician == "D. Taylor"
     assert (r.tx_type or "").startswith("purchase")
+
+
+def test_parse_capitoltrades_html_from_rendered_table_heuristic() -> None:
+    html = """
+    <tr>
+      <td><a href="/politicians/jane-doe">Jane Doe</a></td>
+      <td>
+        <div class="q-fieldset issuer-info">
+          <span class="q-field issuer-ticker">PLD:US</span>
+        </div>
+      </td>
+      <td><div class="text-size-3 font-medium">27 Feb</div></td>
+      <td><div class="text-size-3 font-medium">10 Mar</div></td>
+      <td>Purchase</td>
+      <td>$50,001 - $100,000</td>
+    </tr>
+    """
+    rows = parse_capitoltrades_html(html)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.ticker == "PLD"
+    assert r.politician == "Jane Doe"

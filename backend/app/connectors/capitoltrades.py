@@ -194,6 +194,79 @@ def parse_capitoltrades_html(html: str) -> list[CongressTradeRaw]:
         if rec is not None:
             out.append(rec)
 
+    # Strategy 4: parse rendered HTML table/cards directly.
+    # Observed shape on /trades includes:
+    # - issuer ticker: <span class="q-field issuer-ticker">VMW:US</span>
+    # - nearby politician profile links and trade metadata.
+    ticker_pat = re.compile(r'<span[^>]*class="[^"]*issuer-ticker[^"]*"[^>]*>(?P<t>[^<]+)</span>', flags=re.I)
+    pol_pat = re.compile(r'href="/politicians/[^"]+"[^>]*>(?P<n>[^<]{2,120})</a>', flags=re.I)
+    date_pat = re.compile(r'>(?P<d>\d{1,2}\s+[A-Za-z]{3})</div>')
+    tx_pat = re.compile(r'\b(Purchase|Sale|Sold|Buy|Bought)\b', flags=re.I)
+    amt_pat = re.compile(r'\$[0-9][0-9,\.]*(?:[KMB])?(?:\s*-\s*\$[0-9][0-9,\.]*(?:[KMB])?)?', flags=re.I)
+
+    for i, m in enumerate(ticker_pat.finditer(html)):
+        raw_t = m.group("t").strip().upper()
+        if raw_t in {"N/A", "NA", "-"}:
+            continue
+        ticker = raw_t.split(":")[0].strip()
+        if not re.match(r"^[A-Z]{1,6}(?:\.[A-Z])?$", ticker):
+            continue
+
+        left = max(0, m.start() - 3500)
+        right = min(len(html), m.end() + 3500)
+        window = html[left:right]
+
+        pol_matches = list(pol_pat.finditer(window))
+        if not pol_matches:
+            continue
+        politician = pol_matches[-1].group("n").strip()
+
+        date_matches = [x.group("d").strip() for x in date_pat.finditer(window)]
+        trade_date_s = date_matches[0] if date_matches else None
+        filing_date_s = date_matches[1] if len(date_matches) > 1 else None
+        # Convert "27 Feb" to datetime using current year if no year in rendered UI.
+        year = datetime.utcnow().year
+        trade_date = None
+        filing_date = None
+        if trade_date_s:
+            for y in (year, year - 1):
+                try:
+                    trade_date = datetime.strptime(f"{trade_date_s} {y}", "%d %b %Y")
+                    break
+                except Exception:
+                    pass
+        if filing_date_s:
+            for y in (year, year - 1):
+                try:
+                    filing_date = datetime.strptime(f"{filing_date_s} {y}", "%d %b %Y")
+                    break
+                except Exception:
+                    pass
+
+        tx_m = tx_pat.search(window)
+        amount_m = amt_pat.search(window)
+        tx_type = tx_m.group(1).lower() if tx_m else None
+        if tx_type == "bought":
+            tx_type = "purchase"
+        if tx_type == "buy":
+            tx_type = "purchase"
+        if tx_type == "sold":
+            tx_type = "sale"
+        amount_range = amount_m.group(0) if amount_m else None
+
+        d = {
+            "id": f"html_{i}_{ticker}_{(trade_date.date().isoformat() if trade_date else 'na')}",
+            "ticker": ticker,
+            "politician": politician,
+            "transactionType": tx_type,
+            "amount_range": amount_range,
+            "tradeDate": trade_date.isoformat() if trade_date else None,
+            "filingDate": filing_date.isoformat() if filing_date else None,
+        }
+        rec = _from_candidate(d, salt="html_cards")
+        if rec is not None:
+            out.append(rec)
+
     dedup: dict[tuple[str, str], CongressTradeRaw] = {}
     for r in out:
         key = (r.source_id, r.ticker)
