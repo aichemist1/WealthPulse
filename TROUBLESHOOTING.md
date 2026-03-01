@@ -162,7 +162,12 @@ sudo docker compose --env-file prod.env exec backend python -m app.cli snapshot-
 Run the integrated backend pipeline command:
 ```bash
 cd /opt/wealthpulse
-sudo docker compose --env-file prod.env exec -T backend python -m app.cli run-daily-pipeline-v0 --sec-lookback-days 3 --sec-limit 200 --bootstrap-13f-if-missing --top-n 20
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli run-daily-pipeline-v0 --sec-lookback-days 3 --sec-limit 200 --top-n 20
+```
+
+If you are bootstrapping a brand-new environment with no 13F snapshot, run once with:
+```bash
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli run-daily-pipeline-v0 --sec-lookback-days 3 --sec-limit 200 --top-n 20 --bootstrap-13f-if-missing
 ```
 
 Then verify:

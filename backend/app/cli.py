@@ -1804,7 +1804,9 @@ def run_daily_pipeline_v0(
     as_of: str = typer.Option("", help="As-of datetime (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS; default now UTC)"),
     sec_lookback_days: int = typer.Option(3, help="Try SEC ingestion for this many prior days"),
     sec_limit: int = typer.Option(200, help="Per-day SEC ingest filing limit (Form4/SC13)"),
-    bootstrap_13f_if_missing: bool = typer.Option(True, help="If no 13F snapshot exists, bootstrap 13F ingest+mapping"),
+    bootstrap_13f_if_missing: bool = typer.Option(
+        False, help="If no 13F snapshot exists, bootstrap 13F ingest+mapping (recommended OFF for daily prod runs)"
+    ),
     top_n: int = typer.Option(20, help="Top rows per snapshot"),
     run_congress_ingest: bool = typer.Option(True, help="Run congressional disclosures ingest (CapitolTrades)"),
     run_reddit_ingest: bool = typer.Option(False, help="Run Reddit social ingest step"),
@@ -1868,7 +1870,7 @@ def run_daily_pipeline_v0(
             step.status = status
             step.rows_ingested = max(0, int(rows_ingested or 0))
             step.latest_event_at = latest_event_at
-            step.attempt_count = max(1, int(attempt_count or 1))
+            step.attempt_count = max(0, int(attempt_count or 0))
             step.error_message = (error_message or "")[:2000] or None
             step.metrics_json = metrics or {}
             session.add(step)
@@ -1887,10 +1889,15 @@ def run_daily_pipeline_v0(
     f4_ingested = 0
     f4_seen = 0
     f4_failed_days = 0
+    f4_skipped_days = 0
     f4_attempts = 0
     f4_error = ""
     for offset in range(1, max(1, sec_lookback_days) + 1):
         day = (as_of_dt - timedelta(days=offset)).date()
+        if day.weekday() >= 5:
+            f4_skipped_days += 1
+            typer.echo(f"[pipeline] form4 day={day.isoformat()} skipped (weekend)")
+            continue
         ok = False
         for attempt in range(1, sec_retries + 1):
             f4_attempts += 1
@@ -1911,7 +1918,10 @@ def run_daily_pipeline_v0(
             typer.echo(f"[pipeline] WARN form4 day={day.isoformat()} failed after {sec_retries} attempts: {f4_error}")
     with Session(engine) as session:
         latest_form4 = session.exec(select(InsiderTx).where(InsiderTx.event_date != None).order_by(col(InsiderTx.event_date).desc())).first()  # noqa: E711
-    f4_status = "succeeded" if f4_failed_days == 0 else ("degraded" if f4_ingested > 0 else "failed")
+    if f4_attempts == 0 and f4_skipped_days > 0 and f4_failed_days == 0 and f4_ingested == 0:
+        f4_status = "skipped"
+    else:
+        f4_status = "succeeded" if f4_failed_days == 0 else ("degraded" if f4_ingested > 0 else "failed")
     _finish_step(
         step_id,
         status=f4_status,
@@ -1919,20 +1929,25 @@ def run_daily_pipeline_v0(
         latest_event_at=(latest_form4.event_date if latest_form4 else None),
         attempt_count=f4_attempts,
         error_message=(f4_error if f4_status != "succeeded" else None),
-        metrics={"rows_seen": f4_seen, "failed_days": f4_failed_days, "window_days": sec_lookback_days},
+        metrics={"rows_seen": f4_seen, "failed_days": f4_failed_days, "skipped_days": f4_skipped_days, "window_days": sec_lookback_days},
     )
     step_statuses.append(f4_status)
-    summary["form4"] = {"status": f4_status, "rows_ingested": f4_ingested, "failed_days": f4_failed_days}
+    summary["form4"] = {"status": f4_status, "rows_ingested": f4_ingested, "failed_days": f4_failed_days, "skipped_days": f4_skipped_days}
 
     # 2) SEC SC13
     step_id = _start_step("sc13", "sec_edgar")
     sc13_ingested = 0
     sc13_seen = 0
     sc13_failed_days = 0
+    sc13_skipped_days = 0
     sc13_attempts = 0
     sc13_error = ""
     for offset in range(1, max(1, sec_lookback_days) + 1):
         day = (as_of_dt - timedelta(days=offset)).date()
+        if day.weekday() >= 5:
+            sc13_skipped_days += 1
+            typer.echo(f"[pipeline] sc13 day={day.isoformat()} skipped (weekend)")
+            continue
         ok = False
         for attempt in range(1, sec_retries + 1):
             sc13_attempts += 1
@@ -1955,7 +1970,10 @@ def run_daily_pipeline_v0(
         latest_sc13 = session.exec(
             select(LargeOwnerFiling).where(LargeOwnerFiling.filed_at != None).order_by(col(LargeOwnerFiling.filed_at).desc())  # noqa: E711
         ).first()
-    sc13_status = "succeeded" if sc13_failed_days == 0 else ("degraded" if sc13_ingested > 0 else "failed")
+    if sc13_attempts == 0 and sc13_skipped_days > 0 and sc13_failed_days == 0 and sc13_ingested == 0:
+        sc13_status = "skipped"
+    else:
+        sc13_status = "succeeded" if sc13_failed_days == 0 else ("degraded" if sc13_ingested > 0 else "failed")
     _finish_step(
         step_id,
         status=sc13_status,
@@ -1963,10 +1981,10 @@ def run_daily_pipeline_v0(
         latest_event_at=(latest_sc13.filed_at if latest_sc13 else None),
         attempt_count=sc13_attempts,
         error_message=(sc13_error if sc13_status != "succeeded" else None),
-        metrics={"rows_seen": sc13_seen, "failed_days": sc13_failed_days, "window_days": sec_lookback_days},
+        metrics={"rows_seen": sc13_seen, "failed_days": sc13_failed_days, "skipped_days": sc13_skipped_days, "window_days": sec_lookback_days},
     )
     step_statuses.append(sc13_status)
-    summary["sc13"] = {"status": sc13_status, "rows_ingested": sc13_ingested, "failed_days": sc13_failed_days}
+    summary["sc13"] = {"status": sc13_status, "rows_ingested": sc13_ingested, "failed_days": sc13_failed_days, "skipped_days": sc13_skipped_days}
 
     # Optional social ingest remains best-effort, outside the 5 critical steps.
     if run_reddit_ingest:
@@ -2087,10 +2105,15 @@ def run_daily_pipeline_v0(
             select(SnapshotRun).where(col(SnapshotRun.kind) == "13f_whales").order_by(col(SnapshotRun.as_of).desc(), col(SnapshotRun.created_at).desc())
         ).first()
         need_13f_bootstrap = latest_13f is None
+    snap_substeps: dict[str, dict] = {}
+
     if bootstrap_13f_if_missing and need_13f_bootstrap:
         typer.echo("[pipeline] 13F snapshot missing; running bootstrap ingest.")
         bootstrap_days = [(as_of_dt - timedelta(days=93)).date(), (as_of_dt - timedelta(days=1)).date()]
         for d in bootstrap_days:
+            if d.weekday() >= 5:
+                typer.echo(f"[pipeline] 13f day={d.isoformat()} skipped (weekend)")
+                continue
             try:
                 with Session(engine) as session:
                     r = ingest_13f_day(session=session, client=client, day=d, limit=0)
@@ -2098,24 +2121,36 @@ def run_daily_pipeline_v0(
             except Exception as e:
                 snap_errors.append(f"13f_bootstrap:{d.isoformat()}:{e}")
                 typer.echo(f"[pipeline] WARN 13f day={d.isoformat()} failed: {e}")
-        try:
-            enrich_security_map_openfigi(limit=800, batch_size=10)
-        except Exception as e:
-            snap_errors.append(f"openfigi:{e}")
-            typer.echo(f"[pipeline] WARN openfigi enrichment failed: {e}")
+        if (settings.openfigi_api_key or "").strip():
+            try:
+                enrich_security_map_openfigi(limit=800, batch_size=10)
+            except Exception as e:
+                snap_errors.append(f"openfigi:{e}")
+                typer.echo(f"[pipeline] WARN openfigi enrichment failed: {e}")
+        else:
+            typer.echo("[pipeline] openfigi enrichment skipped (no api key)")
 
+    step_13f = _start_step("snapshot_13f", "internal")
     report_p = previous_quarter_end(as_of_dt.date()) or previous_quarter_end((as_of_dt - timedelta(days=1)).date())
     if report_p is not None:
         try:
             snapshot_13f_whales(report_period=report_p.isoformat(), top_n=top_n)
+            _finish_step(step_13f, status="succeeded", rows_ingested=1, latest_event_at=as_of_dt, attempt_count=1, metrics={"report_period": report_p.isoformat()})
+            snap_substeps["snapshot_13f"] = {"status": "succeeded"}
         except Exception as e:
             snap_errors.append(f"snapshot13f:{e}")
             typer.echo(f"[pipeline] WARN snapshot-13f-whales failed: {e}")
+            _finish_step(step_13f, status="failed", rows_ingested=0, latest_event_at=as_of_dt, attempt_count=1, error_message=str(e), metrics={"report_period": report_p.isoformat()})
+            snap_substeps["snapshot_13f"] = {"status": "failed", "error": str(e)}
     else:
-        snap_errors.append("snapshot13f:no_prior_quarter_end")
+        msg = "no_prior_quarter_end"
+        snap_errors.append(f"snapshot13f:{msg}")
         typer.echo("[pipeline] WARN no prior quarter end available for 13F snapshot.")
+        _finish_step(step_13f, status="skipped", rows_ingested=0, latest_event_at=as_of_dt, attempt_count=0, error_message=msg, metrics={})
+        snap_substeps["snapshot_13f"] = {"status": "skipped", "reason": msg}
 
     as_of_s = as_of_dt.isoformat(timespec="seconds")
+    step_recs = _start_step("snapshot_recommendations", "internal")
     try:
         snapshot_recommendations_v0(
             as_of=as_of_s,
@@ -2124,8 +2159,14 @@ def run_daily_pipeline_v0(
             buy_score_threshold=70,
             insider_min_value=100_000,
         )
+        _finish_step(step_recs, status="succeeded", rows_ingested=1, latest_event_at=as_of_dt, attempt_count=1, metrics={})
+        snap_substeps["snapshot_recommendations"] = {"status": "succeeded"}
     except Exception as e:
         snap_errors.append(f"recommendations:{e}")
+        _finish_step(step_recs, status="failed", rows_ingested=0, latest_event_at=as_of_dt, attempt_count=1, error_message=str(e), metrics={})
+        snap_substeps["snapshot_recommendations"] = {"status": "failed", "error": str(e)}
+
+    step_fresh = _start_step("snapshot_fresh_signals", "internal")
     try:
         snapshot_fresh_signals_v0(
             as_of=as_of_s,
@@ -2135,13 +2176,24 @@ def run_daily_pipeline_v0(
             avoid_score_threshold=35,
             top_n=top_n,
         )
+        _finish_step(step_fresh, status="succeeded", rows_ingested=1, latest_event_at=as_of_dt, attempt_count=1, metrics={})
+        snap_substeps["snapshot_fresh_signals"] = {"status": "succeeded"}
     except Exception as e:
         snap_errors.append(f"fresh_signals:{e}")
+        _finish_step(step_fresh, status="failed", rows_ingested=0, latest_event_at=as_of_dt, attempt_count=1, error_message=str(e), metrics={})
+        snap_substeps["snapshot_fresh_signals"] = {"status": "failed", "error": str(e)}
+
+    step_artifact = _start_step("snapshot_daily_artifact", "internal")
     try:
         snapshot_daily_artifact_v0(as_of=as_of_s, top_n_rows=25, picks_per_segment=3, force=False)
+        _finish_step(step_artifact, status="succeeded", rows_ingested=1, latest_event_at=as_of_dt, attempt_count=1, metrics={})
+        snap_substeps["snapshot_daily_artifact"] = {"status": "succeeded"}
     except Exception as e:
         snap_errors.append(f"artifact:{e}")
+        _finish_step(step_artifact, status="failed", rows_ingested=0, latest_event_at=as_of_dt, attempt_count=1, error_message=str(e), metrics={})
+        snap_substeps["snapshot_daily_artifact"] = {"status": "failed", "error": str(e)}
 
+    step_backtest = _start_step("snapshot_backtest", "internal")
     if run_backtest:
         start_s = (as_of_dt - timedelta(days=max(30, backtest_lookback_days))).date().isoformat()
         end_s = as_of_dt.date().isoformat()
@@ -2155,11 +2207,21 @@ def run_daily_pipeline_v0(
                 top_n_per_action=5,
                 persist=True,
             )
+            _finish_step(step_backtest, status="succeeded", rows_ingested=1, latest_event_at=as_of_dt, attempt_count=1, metrics={})
+            snap_substeps["snapshot_backtest"] = {"status": "succeeded"}
         except Exception as e:
             snap_errors.append(f"backtest:{e}")
             typer.echo(f"[pipeline] WARN backtest failed: {e}")
+            _finish_step(step_backtest, status="failed", rows_ingested=0, latest_event_at=as_of_dt, attempt_count=1, error_message=str(e), metrics={})
+            snap_substeps["snapshot_backtest"] = {"status": "failed", "error": str(e)}
+    else:
+        _finish_step(step_backtest, status="skipped", rows_ingested=0, latest_event_at=as_of_dt, attempt_count=0, error_message="disabled", metrics={})
+        snap_substeps["snapshot_backtest"] = {"status": "skipped"}
 
+    step_draft = _start_step("snapshot_subscriber_draft", "internal")
     send_daily_subscriber_alerts_cli(as_of=as_of_s, limit_subscribers=0, send=False)
+    _finish_step(step_draft, status="succeeded", rows_ingested=1, latest_event_at=as_of_dt, attempt_count=1, metrics={})
+    snap_substeps["snapshot_subscriber_draft"] = {"status": "succeeded"}
 
     with Session(engine) as session:
         run_count_after = len(session.exec(select(SnapshotRun.id)).all())
@@ -2180,7 +2242,7 @@ def run_daily_pipeline_v0(
         metrics={"errors_count": len(snap_errors)},
     )
     step_statuses.append(snap_status)
-    summary["snapshots"] = {"status": snap_status, "rows_ingested": snap_created, "errors_count": len(snap_errors)}
+    summary["snapshots"] = {"status": snap_status, "rows_ingested": snap_created, "errors_count": len(snap_errors), "substeps": snap_substeps}
 
     final_status = "succeeded"
     if "failed" in step_statuses:
