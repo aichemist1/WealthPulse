@@ -151,6 +151,49 @@ def parse_capitoltrades_html(html: str) -> list[CongressTradeRaw]:
         if rec is not None:
             out.append(rec)
 
+    # Strategy 3: Next.js App Router payload heuristics (escaped JSON fragments).
+    # Some pages no longer expose __NEXT_DATA__; they embed serialized chunks where keys
+    # appear as \"ticker\":\"XYZ\" etc.
+    unescaped = html.replace('\\"', '"')
+    ticker_iter = list(re.finditer(r'"ticker"\s*:\s*"(?P<t>[A-Z]{1,6}(?:\.[A-Z])?)"', unescaped))
+    for i, m_t in enumerate(ticker_iter):
+        left = max(0, m_t.start() - 700)
+        right = min(len(unescaped), m_t.end() + 700)
+        window = unescaped[left:right]
+
+        pol_m = re.search(
+            r'"(?:representative|politician|senator|member|name)"\s*:\s*"(?P<v>[^"]{3,120})"',
+            window,
+            flags=re.I,
+        )
+        if not pol_m:
+            continue
+
+        tx_m = re.search(r'"(?:txType|transactionType|type|transaction)"\s*:\s*"(?P<v>[^"]{1,40})"', window, flags=re.I)
+        amt_m = re.search(r'"(?:amountRange|amount_range|amount|range)"\s*:\s*"(?P<v>[^"]{1,80})"', window, flags=re.I)
+        trd_m = re.search(r'"(?:tradeDate|traded|transactionDate)"\s*:\s*"(?P<v>\d{4}-\d{2}-\d{2}[^"]*)"', window, flags=re.I)
+        fil_m = re.search(r'"(?:filingDate|filed|disclosureDate|publishedAt)"\s*:\s*"(?P<v>\d{4}-\d{2}-\d{2}[^"]*)"', window, flags=re.I)
+        id_m = re.search(r'"(?:transaction_id|id|slug)"\s*:\s*"(?P<v>[^"]{2,120})"', window, flags=re.I)
+        chamber_m = re.search(r'"chamber"\s*:\s*"(?P<v>house|senate)"', window, flags=re.I)
+
+        if not tx_m and not trd_m and not fil_m:
+            # avoid random ticker+name joins from unrelated script chunks.
+            continue
+
+        d = {
+            "id": id_m.group("v") if id_m else f"heur_{i}_{m_t.group('t')}",
+            "ticker": m_t.group("t"),
+            "politician": pol_m.group("v").strip(),
+            "transactionType": tx_m.group("v").strip() if tx_m else None,
+            "amount_range": amt_m.group("v").strip() if amt_m else None,
+            "tradeDate": trd_m.group("v").strip() if trd_m else None,
+            "filingDate": fil_m.group("v").strip() if fil_m else None,
+            "chamber": chamber_m.group("v").strip().lower() if chamber_m else None,
+        }
+        rec = _from_candidate(d, salt="heuristic")
+        if rec is not None:
+            out.append(rec)
+
     dedup: dict[tuple[str, str], CongressTradeRaw] = {}
     for r in out:
         key = (r.source_id, r.ticker)

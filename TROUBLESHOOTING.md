@@ -176,3 +176,50 @@ From the VM:
 cd /opt/wealthpulse
 WEALTHPULSE_BASE_URL="http://127.0.0.1" bash scripts/deploy_smoke_test.sh
 ```
+
+## Ingestion + data validation runbook (reusable)
+
+Use this when dashboard cards look empty or you need to prove what was ingested.
+
+### 1) Rebuild backend and run pipeline once
+```bash
+cd /opt/wealthpulse
+sudo docker compose --env-file prod.env up -d --build backend
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli run-daily-pipeline-v0 --sec-lookback-days 3 --sec-limit 200 --top-n 20 --no-run-backtest
+```
+
+### 2) Check pipeline + step telemetry from CLI
+```bash
+cd /opt/wealthpulse
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli pipeline-status-v0 --lookback-days 7
+```
+
+Expected: step lines for `form4`, `sc13`, `congress`, `prices`, `snapshots` with status and row counts.
+
+### 3) Validate through backend API (Data Ops)
+```bash
+curl -s http://127.0.0.1:8000/admin/data-ops/latest
+# or pretty-print:
+curl -s http://127.0.0.1:8000/admin/data-ops/latest | jq
+```
+
+Check:
+- `counts` (insider/sc13/congress/price/snapshots)
+- `latest_events`
+- `latest_pipeline_run.status`
+- `latest_pipeline_run.steps[*]`
+
+### 4) Query Postgres directly (ground truth)
+```bash
+cd /opt/wealthpulse
+sudo docker compose --env-file prod.env exec -T db psql -U wealthpulse -d wealthpulse -c "select run_type,status,started_at,completed_at from ingestion_runs order by started_at desc limit 5;"
+sudo docker compose --env-file prod.env exec -T db psql -U wealthpulse -d wealthpulse -c "select step_name,source_name,status,rows_ingested,latest_event_at,error_message from ingestion_step_runs order by started_at desc limit 20;"
+sudo docker compose --env-file prod.env exec -T db psql -U wealthpulse -d wealthpulse -c "select count(*) as congress_rows from congress_trades;"
+sudo docker compose --env-file prod.env exec -T db psql -U wealthpulse -d wealthpulse -c "select politician,ticker,trade_date,filing_date,amount_range from congress_trades order by coalesce(filing_date,trade_date) desc limit 10;"
+```
+
+### 5) Validate card source payloads
+```bash
+curl -s http://127.0.0.1:8000/admin/congress/latest | jq '.rows[:5]'
+curl -s http://127.0.0.1:8000/admin/segments/latest | jq '.segments[] | {key,name,picks: (.picks|length)}'
+```

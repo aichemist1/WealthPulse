@@ -31,3 +31,17 @@ def test_parse_capitoltrades_html_from_text_fallback() -> None:
     r = rows[0]
     assert r.ticker == "PLD"
     assert r.politician.endswith("Capito")
+
+
+def test_parse_capitoltrades_html_from_escaped_chunk_heuristic() -> None:
+    html = r'''
+    <script>
+    self.__next_f.push([1,"{\"rows\":[{\"id\":\"abc123\",\"representative\":\"D. Taylor\",\"ticker\":\"PLD\",\"transactionType\":\"Purchase\",\"amountRange\":\"$15,001 - $50,000\",\"tradeDate\":\"2026-01-29\",\"filingDate\":\"2026-02-15\",\"chamber\":\"house\"}]}"]);
+    </script>
+    '''
+    rows = parse_capitoltrades_html(html)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.ticker == "PLD"
+    assert r.politician == "D. Taylor"
+    assert (r.tx_type or "").startswith("purchase")
