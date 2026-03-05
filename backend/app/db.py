@@ -6,9 +6,17 @@ from sqlmodel import Session, SQLModel, create_engine
 from app.settings import settings
 
 
+def _is_sqlite(url: str) -> bool:
+    return url.strip().lower().startswith("sqlite:")
+
+
 def create_db_engine():
+    if settings.db_require_postgres and _is_sqlite(settings.db_url):
+        raise RuntimeError(
+            "Postgres is required (WEALTHPULSE_DB_REQUIRE_POSTGRES=true), but WEALTHPULSE_DB_URL points to SQLite."
+        )
     connect_args = {}
-    if settings.db_url.startswith("sqlite:"):
+    if _is_sqlite(settings.db_url):
         connect_args = {"check_same_thread": False}
     return create_engine(settings.db_url, echo=False, connect_args=connect_args)
 
@@ -84,7 +92,7 @@ def _existing_tables() -> set[str]:
 
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
-    if settings.db_url.startswith("sqlite:"):
+    if _is_sqlite(settings.db_url):
         _sqlite_migrate()
 
 

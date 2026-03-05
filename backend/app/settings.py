@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="WEALTHPULSE_", extra="ignore")
 
     db_url: str = "sqlite:///./wealthpulse.db"
+    db_require_postgres: bool = False
     sec_user_agent: str = "WealthPulse dev (email@example.com)"
     sec_rps: float = 3.0
     sec_timeout_s: float = 45.0

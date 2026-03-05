@@ -18,11 +18,17 @@ Data persistence:
 - Postgres stores all application state (subscriptions, alert runs, deliveries, snapshots).
 - Postgres data directory is mounted to a persistent volume/disk.
 
-What we *avoid* in v0:
+What we *avoid* in early v0:
 - Kubernetes
 - Redis/queues
-- Managed DB (RDS/Cloud SQL)
 - “Migration framework work” (Alembic) — we can add later when schema churn increases
+
+## Production posture (current)
+For production-grade operation on AWS:
+- Keep `web` + `backend` containerized on EC2.
+- Move database tier to **AWS RDS PostgreSQL**.
+- Treat Postgres as the single source of truth and validate runs via SQL + Data Ops endpoint.
+- Avoid ad-hoc/manual hotfix scripts; use code+config driven deploys only.
 
 ## VM prerequisites (AWS/GCP-neutral)
 - A small Linux VM (start small; resize later if needed).
@@ -42,6 +48,11 @@ Create a `prod.env` file on the VM (do not commit).
 
 Backend DB URL (container-to-container hostname `db`):
 - `WEALTHPULSE_DB_URL=postgresql+psycopg://wealthpulse:<POSTGRES_PASSWORD>@db:5432/wealthpulse`
+- `WEALTHPULSE_DB_REQUIRE_POSTGRES=true` (recommended for deployed envs; prevents accidental SQLite drift)
+
+For RDS cutover:
+- `WEALTHPULSE_DB_URL=postgresql+psycopg://<user>:<password>@<rds-endpoint>:5432/wealthpulse`
+- keep `WEALTHPULSE_DB_REQUIRE_POSTGRES=true`
 
 ### Public base URL (important for email links)
 For IP-only pilot:
@@ -121,6 +132,7 @@ POSTGRES_PASSWORD=change_me
 
 # --- WealthPulse backend ---
 WEALTHPULSE_DB_URL=postgresql+psycopg://wealthpulse:change_me@db:5432/wealthpulse
+WEALTHPULSE_DB_REQUIRE_POSTGRES=true
 WEALTHPULSE_PUBLIC_BASE_URL=http://<VM_PUBLIC_IP>
 WEALTHPULSE_CORS_ORIGINS=http://<VM_PUBLIC_IP>
 WEALTHPULSE_SEC_USER_AGENT=WealthPulse (you@domain.com)
@@ -138,6 +150,71 @@ WEALTHPULSE_SMTP_PASSWORD=your_app_password
 WEALTHPULSE_SMTP_FROM_EMAIL=your@gmail.com
 WEALTHPULSE_SMTP_FROM_NAME=WealthPulse
 ```
+
+## RDS PostgreSQL cutover (production-grade)
+This section defines a controlled migration from Compose `db` to AWS RDS PostgreSQL.
+
+### 1) Provision RDS
+- Engine: PostgreSQL (supported major version).
+- Instance class: start small (pilot), enable storage autoscaling.
+- Networking:
+  - RDS in private subnets.
+  - Security group allows inbound `5432` **only** from EC2 app SG.
+  - No public DB access.
+- Reliability:
+  - Enable automated backups (>=7 days).
+  - Enable deletion protection.
+  - Set maintenance window.
+
+### 2) Create DB + user
+Use least-privileged app user:
+- DB: `wealthpulse`
+- User: `wealthpulse_app` (example)
+- Grants scoped to app DB/schema.
+
+### 3) Data migration (one-time cutover)
+On EC2:
+```bash
+cd /opt/wealthpulse
+
+# Export from current Compose db
+sudo docker compose --env-file prod.env exec -T db pg_dump -U wealthpulse -d wealthpulse -Fc > /tmp/wealthpulse_pre_rds.dump
+
+# Restore into RDS
+pg_restore --no-owner --no-privileges -h <RDS_ENDPOINT> -p 5432 -U <RDS_USER> -d wealthpulse /tmp/wealthpulse_pre_rds.dump
+```
+
+### 4) Switch app to RDS
+Update `/opt/wealthpulse/prod.env`:
+```bash
+WEALTHPULSE_DB_URL=postgresql+psycopg://<RDS_USER>:<RDS_PASSWORD>@<RDS_ENDPOINT>:5432/wealthpulse
+```
+Then restart backend/web:
+```bash
+cd /opt/wealthpulse
+sudo docker compose --env-file prod.env up -d --build --force-recreate backend web
+```
+
+### 5) Cutover validation (required)
+Run pipeline + SQL checks:
+```bash
+cd /opt/wealthpulse
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli run-daily-pipeline-v0 --sec-lookback-days 1 --sec-limit 100 --top-n 20 --no-run-backtest --no-bootstrap-13f-if-missing
+sudo docker compose --env-file prod.env exec -T backend python -m app.cli pipeline-status-v0 --lookback-days 7
+```
+
+Run DB-first validation queries from `TROUBLESHOOTING.md` (latest run, step statuses, source counts, sample rows).
+
+### 6) Rollback plan
+If validation fails:
+1) Revert `WEALTHPULSE_DB_URL` to Compose `db` URL.
+2) Recreate backend/web.
+3) Investigate RDS connectivity/permissions/data restore.
+
+### 7) Post-cutover hardening
+- Keep nightly logical backup (`pg_dump`) to S3 as secondary backup.
+- Add DB connection health check to deployment smoke tests.
+- Remove/disable Compose `db` service only after successful soak period.
 
 ## Deploy on a VM (IP-only pilot)
 On the VM:

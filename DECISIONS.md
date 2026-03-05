@@ -276,6 +276,19 @@ Record decisions here so we can resume without re-deriving context.
 - Data operability decision:
   - prioritize Postgres queryability and backend observability so admin can verify what was ingested (not rely on UI cards alone).
   - add ingestion run/step telemetry tables and a Data Ops admin view as the next implementation block.
+
+## 2026-03-05 — Production-grade DB direction (AWS)
+- Keep backend architecture as a modular monolith, but adopt strict 3-tier production operation:
+  - Tier 1: Caddy + SPA
+  - Tier 2: FastAPI backend
+  - Tier 3: Postgres on **AWS RDS**
+- Decision rationale:
+  - Improve durability/backup/operability for deployed MVP.
+  - Enable direct SQL validation as a first-class reliability gate.
+  - Eliminate ambiguity from environment drift and temporary/manual workarounds.
+- Operating policy:
+  - no ad-hoc EC2 patches; use feature branch → merge → deploy.
+  - run DB-first validation queries after pipeline runs as release acceptance criteria.
   - pipeline generates subscriber draft run; admin still sends from dashboard.
 
 ## 2026-02-18 — Congressional Trading widget (v0)

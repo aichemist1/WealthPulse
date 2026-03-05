@@ -246,6 +246,9 @@ To keep the system incremental and cheap while still feeling “agent-like”, w
    - Collects **cashtag mention velocity** (Reddit/X) and a lightweight polarity signal (keyword-based at first).
    - Implements noise controls (cooldown / persistence across multiple refresh cycles before materially affecting scores).
    - Pilot stance: keep this **optional** and behind a feature flag until we decide on sources and rate limits.
+   - For options-flow posts from social handles (example: “Flow Guard” on X), treat as **secondary signal only**:
+     - Not a trade-confirmation source.
+     - Requires corroboration from primary market/filing/price signals before action upgrades.
 
 3) **Mapmaker** (technicals “floor/ceiling” guardrails)
    - Maintains technical features per ticker (at minimum **SMA50/SMA200**, plus simple support/resistance approximations).
@@ -270,6 +273,48 @@ Rather than “refresh everything constantly”, we run each listener on an inte
 - **Medium lane (10–15 minutes, optional):** Listener (social mentions)
   - Rationale: social moves in “waves”; persistence check prevents reacting to single spikes.
 - **Slow lane (daily):** fundamentals / static reference data (e.g., sector mappings, dividend metadata)
+
+## X-based options-flow listener (design, future source)
+Goal: ingest near-real-time options-flow chatter from selected X handles while staying explainable and low-risk.
+
+### Source classification
+- **Class A (primary):** direct options trade feeds/APIs (institutional-grade prints).
+- **Class B (secondary):** social repost/summary accounts on X (e.g., “Flow Guard”).
+
+Rule:
+- Class B can influence **attention/confidence**, but cannot by itself trigger strong Buy/Sell actions.
+
+### Data contract (new `x_options_signals` table)
+- `id` (pk)
+- `source` (`x`)
+- `handle` (e.g., `flow_guard`)
+- `post_id`
+- `posted_at`
+- `ticker`
+- `option_side` (`call|put|unknown`)
+- `expiry` (nullable)
+- `strike` (nullable)
+- `premium_usd` (nullable)
+- `raw_text`
+- `parsed_confidence` (0..1)
+- `detected_at`
+- unique key: (`source`, `post_id`, `ticker`)
+
+### Parsing and scoring policy
+- Parse only structured/explicit tokens (ticker, call/put, strike, expiry, premium if present).
+- If parse quality is low, store raw entry with `parsed_confidence < 0.4` and do not score.
+- Add max **+2 score adjustment** for strong/confirmed social options signals.
+- Require one corroborator (trend or filings or insider) before converting watch → buy.
+
+### Refresh and operations
+- Poll cadence: **10–15 minutes** during market hours (feature-flagged).
+- Persistence rule: require repeated signal in ≥2 windows for material adjustment.
+- Circuit breaker: if parse success rate drops below threshold, auto-disable score contribution.
+
+### Compliance and reliability guardrails
+- Prefer official API access over scraping.
+- Keep raw post ids and timestamps for audit/replay.
+- Mark all X-derived options evidence as `source_lag=unknown` and `confidence_limited=true`.
 
 ## Ingestion pipeline contract (stabilization)
 Formalize one orchestration path: `run-daily-pipeline-v0` with explicit steps in fixed order:

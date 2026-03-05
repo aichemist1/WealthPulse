@@ -73,6 +73,7 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [ ] Vendor hardening (rate limits, retries, DLQ)
 - [ ] Performance tuning (caching, precompute, pagination)
 - [ ] Social listener scheduler (Reddit 10–15 min cadence; planned for future release)
+- [ ] X options-flow listener (v0.2): secondary-signal ingestion from selected handles (e.g., Flow Guard), schema-backed and corroboration-gated
 - [ ] Real-time price tracking (v0.2): intraday bars/quotes + freshness checks (cost-controlled)
 
 ## Deployment & Ops (v0)
@@ -85,6 +86,8 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - [ ] Add ingestion run telemetry tables (`ingestion_runs`, `ingestion_step_runs`)
 - [ ] Add Data Ops admin view (source counts, freshness, failures)
 - [ ] Add source-level retries/backoff + degraded run status
+- [ ] RDS PostgreSQL cutover (AWS): migrate from Compose `db`, update `WEALTHPULSE_DB_URL`, validate via SQL gates
+- [ ] Post-cutover hardening: backup policy (RDS snapshots + logical dumps), rollback drill, and DB connectivity smoke checks
 
 ## Current Status (as of 2026-02-16)
 - MVP is functional end-to-end: ingestion → scoring → admin review → subscriber send.
@@ -93,6 +96,6 @@ This file is the checklist to track phases and to pause/resume cleanly.
 - Next priority remains reliability/ops hardening (scheduler + data-quality warnings + observability).
 
 ## Next 3 Execution Steps
-1. Implement clean pipeline telemetry (step status, rows, latest_event_at, errors).
-2. Add Data Ops UI + API for backend data validation and source freshness.
-3. Enforce Postgres-only in deployed env and remove silent SQLite drift.
+1. Complete RDS PostgreSQL cutover with controlled migration + rollback plan.
+2. Enforce Postgres-only deployed runtime and keep DB-first validation gates.
+3. Add Data Ops UI in Runs for source-level freshness and step diagnostics.
